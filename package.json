@@ -1,0 +1,20 @@
+{
+  "name": "crowd-rapp",
+  "version": "0.1.0",
+  "description": "Crowd-Following Beam — LLM rApp demo. gNB/SMO/rApp loop, real geometry, three use cases.",
+  "main": "src/server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js"
+  },
+  "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
+    "express": "^4.21.1",
+    "puppeteer": "^25.8.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
