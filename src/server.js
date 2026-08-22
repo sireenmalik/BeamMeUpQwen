@@ -60,4 +60,4 @@ app.use(express.static(dist));
 app.get("*", (_req, res) => res.sendFile(path.join(dist, "index.html")));
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`crowd-rapp on :${PORT}  tick=${TICK_MS}ms  provider=${process.env.LLM_PROVIDER||"none"}`));
+app.listen(PORT, () => console.log(`crowd-rapp on :${PORT}  tick=${TICK_MS}ms  provider=${process.env.MODEL_PROVIDER||"none"}`));
