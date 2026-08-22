@@ -111,8 +111,10 @@ export default function App() {
           <span className={`inline-block px-2 py-0.5 rounded-full text-[10px] font-semibold mr-2 ${state?.running ? "bg-teal-100 text-teal-700" : "bg-slate-200 text-slate-500"}`}>
             {state?.running ? "● TRACKING" : "○ STOPPED"}
           </span>
-          <span className="text-teal-700 font-mono">{model?.provider}/{model?.name}</span> · tick {state?.tick ?? "—"}
-        </div>
+         <span className="text-teal-700 font-mono">{model?.name || "qwen2.5-0.5b"}</span>
+         <span className="ml-1.5 px-1.5 py-0.5 rounded bg-teal-600 text-white text-[10px] font-semibold tracking-wide">LoRA TUNED</span>
+         <span className="text-slate-500"> · tick {state?.tick ?? "—"}</span>
+         </div>
       </header>
 
       {/* three fixed-position mode buttons — positions never change, only ON/OFF state */}
