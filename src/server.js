@@ -1,3 +1,4 @@
+import "./env.js";
 // server.js — Express API + interval-driven control loop + static frontend.
 import express from "express";
 import cors from "cors";
