@@ -25,3 +25,9 @@ Thumbs.db
 trainer_tmp/
 traces/*.json
 lora_weights_summary.txt
+beam-f16.gguf
+beam-merged/
+beam-f16.gguf
+beam-merged/
+adapter/
+*.gguf
