@@ -31,3 +31,5 @@ beam-f16.gguf
 beam-merged/
 adapter/
 *.gguf
+~$*
+*_3.pptx
