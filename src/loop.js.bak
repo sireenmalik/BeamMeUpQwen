@@ -65,10 +65,6 @@ export class ControlLoop {
     for (const u of ues) spreadR += (u.x - cx) ** 2 + (u.y - cy) ** 2;
     spreadR = ues.length ? Math.sqrt(spreadR / ues.length) : 8;
 
-    // capture the beam position BEFORE this tick's update, so the reason text can
-    // describe the actual direction of movement (fixes "left" showing while steering right)
-    const prevFanCenter = this.fanCenter;
-
     // ONE centroid. Smooth it lightly so it isn't jumpy, then the beam aims exactly here.
     const { az: smAz, vel } = this.smoother.update(centAzTrue);
     const beamRangeTilt = rangeToTilt(meanRange);
@@ -148,32 +144,19 @@ export class ControlLoop {
     };
     this.lastLog = log;
     this.lastProposal = params;
-
-    // direction-aware reason, computed from the ACTUAL committed move (post-clamp),
-    // so the audit text always matches which way the beam went this tick.
-    const committedFan = this.fanCenter;
-    let reasonText;
-    if (committedFan > prevFanCenter + 1) {
-      reasonText = "steering the fan right toward the count-weighted centroid";
-    } else if (committedFan < prevFanCenter - 1) {
-      reasonText = "steering the fan left toward the count-weighted centroid";
-    } else {
-      reasonText = "holding on the count-weighted centroid";
-    }
-
-    // rolling proposal history (oldest first, newest at end, keep last 100) with timestamps
+    // rolling proposal history (newest first, keep last 12) with timestamps
     this.proposalHistory = this.proposalHistory || [];
     const t = new Date();
     const hhmmss = t.toTimeString().slice(0, 8);
-    this.proposalHistory.push({
+    this.proposalHistory.unshift({
       t: hhmmss,
       tick: this.tick,
       fan_center: params.fan_center,
       tilt: params.tilt,
       action: params.action,
-      reason: reasonText
+      reason: params.reason
     });
-    if (this.proposalHistory.length > 100) this.proposalHistory.shift();
+    if (this.proposalHistory.length > 12) this.proposalHistory.pop();
     return log;
   }
 

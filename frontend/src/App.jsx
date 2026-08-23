@@ -56,6 +56,19 @@ export default function App() {
   const refresh = useCallback(async () => { try { setState(await api("/api/state")); } catch {} }, []);
   useEffect(() => { refresh(); const id = setInterval(refresh, 500); return () => clearInterval(id); }, [refresh]);
 
+  // ---- proposals scroll: pin to bottom unless the user has scrolled up ----
+  const scrollRef = useRef(null);
+  const pinnedRef = useRef(true);          // is the view currently stuck to the newest (bottom)?
+  const lastTickRef = useRef(0);           // newest tick we have already auto-scrolled to
+  const [showJump, setShowJump] = useState(false);
+
+  const onProposalScroll = useCallback(() => {
+    const el = scrollRef.current; if (!el) return;
+    const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 24;
+    pinnedRef.current = atBottom;
+    setShowJump(!atBottom);
+  }, []);
+
   // click on the field only does something in linear mode (uses ref, no stale closure)
   const onWalk = useCallback((pt) => { if (activeRef.current === "linear") api("/api/walk", pt); }, []);
 
@@ -99,6 +112,29 @@ export default function App() {
   const r1 = log?.SMO_to_rApp_R1;
   const proposals = state?.proposals || [];
   const activeHint = MODES.find(m => m.key === active)?.hint || "Pick a mode to start tracking.";
+
+  // auto-scroll to newest ONLY when a genuinely new tick arrives AND the user is pinned to bottom.
+  // (the 500ms poll re-sends the same list; keying off the newest tick stops per-poll jitter.)
+  const newestTick = proposals.length ? proposals[proposals.length - 1].tick : 0;
+  useEffect(() => {
+    const el = scrollRef.current; if (!el) return;
+    if (newestTick !== lastTickRef.current) {
+      lastTickRef.current = newestTick;
+      if (pinnedRef.current) {
+        el.scrollTop = el.scrollHeight;   // stick to newest
+        setShowJump(false);
+      } else {
+        setShowJump(true);                // new item arrived while scrolled up
+      }
+    }
+  }, [newestTick]);
+
+  const jumpToNewest = () => {
+    const el = scrollRef.current; if (!el) return;
+    el.scrollTop = el.scrollHeight;
+    pinnedRef.current = true;
+    setShowJump(false);
+  };
 
   return (
     <div className="h-screen flex flex-col text-slate-800 bg-white overflow-hidden">
@@ -162,17 +198,25 @@ export default function App() {
           ]} />
           <div className="flex flex-col min-h-0 bg-white rounded-xl border border-slate-200 overflow-hidden">
             <div className="text-[11px] font-semibold uppercase tracking-wide px-3 py-2 border-b border-slate-200 shrink-0 text-amber-700">Proposals by Non-RT RIC rApp [LLM]</div>
-            <div className="flex-1 min-h-0 overflow-auto divide-y divide-slate-100">
-              {proposals.length === 0 && <div className="p-3 text-xs text-slate-400">waiting…</div>}
-              {proposals.map((p, i) => (
-                <div key={p.tick} className={`px-3 py-1.5 text-[11px] ${i === 0 ? "bg-amber-50" : ""}`}>
-                  <div className="flex justify-between font-mono text-slate-500">
-                    <span>{p.t}</span><span>#{p.tick} · {p.action}</span>
+            <div className="relative flex-1 min-h-0">
+              <div ref={scrollRef} onScroll={onProposalScroll} className="absolute inset-0 overflow-auto divide-y divide-slate-100">
+                {proposals.length === 0 && <div className="p-3 text-xs text-slate-400">waiting…</div>}
+                {proposals.map((p, i) => (
+                  <div key={p.tick} className={`px-3 py-1.5 text-[11px] ${i === proposals.length - 1 ? "bg-amber-50" : ""}`}>
+                    <div className="flex justify-between font-mono text-slate-500">
+                      <span>{p.t}</span><span>#{p.tick} · {p.action}</span>
+                    </div>
+                    <div className="font-mono text-slate-800">az {p.fan_center}° · tilt {p.tilt}°</div>
+                    <div className="text-slate-500 italic leading-snug">{p.reason}</div>
                   </div>
-                  <div className="font-mono text-slate-800">az {p.fan_center}° · tilt {p.tilt}°</div>
-                  <div className="text-slate-500 italic leading-snug">{p.reason}</div>
-                </div>
-              ))}
+                ))}
+              </div>
+              {showJump && (
+                <button onClick={jumpToNewest}
+                  className="absolute bottom-2 right-2 text-[10px] font-semibold bg-amber-600 text-white px-2 py-1 rounded shadow hover:bg-amber-700">
+                  ↓ new
+                </button>
+              )}
             </div>
           </div>
         </div>
