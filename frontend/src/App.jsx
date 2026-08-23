@@ -16,6 +16,15 @@ const MODES = [
   { key: "chaos",  label: "Detect Chaos", hint: "Chaos / coverage-widening is a future INTENT use case.", color: "red", disabled: true },
 ];
 
+// forecasting modes for the beam: same tuned model, deterministic tool changes.
+// predictive is the L3 tuned model — WIP, currently falls back to lead.
+const FORECAST = [
+  { key: "reactive", label: "Reactive", hint: "Aims at the crowd now. Baseline follower." },
+  { key: "lead",     label: "Lead",     hint: "Aims ahead of the crowd on steady motion." },
+  { key: "momentum", label: "Momentum", hint: "Momentum-smoothed lead. Steadier under motion." },
+  { key: "predictive", label: "Predictive", hint: "Learned forecast (L3 model). Work in progress.", wip: true },
+];
+
 function ModeButton({ label, on, color, onClick, disabled }) {
   const onCls = color === "red" ? "bg-red-600 text-white border-red-600" : "bg-teal-600 text-white border-teal-600";
   const offCls = "bg-white text-slate-700 border-slate-300 hover:bg-slate-50";
@@ -50,6 +59,7 @@ function KVPanel({ title, rows, tone }) {
 export default function App() {
   const [state, setState] = useState(null);
   const [active, setActive] = useState(null); // 'auto' | 'linear' | 'chaos' | null
+  const [forecast, setForecast] = useState("reactive");
   const activeRef = useRef(null);
   activeRef.current = active;
 
@@ -87,6 +97,11 @@ export default function App() {
     }
   };
 
+  const selectForecast = (key) => {
+    setForecast(key);          // reflect selection immediately (predictive shows as WIP but is selectable)
+    api("/api/mode", { mode: key });
+  };
+
   const log = state?.log;
 
   // pop sound mimicking a firecracker/gunshot for the chaos trigger
@@ -112,6 +127,7 @@ export default function App() {
   const r1 = log?.SMO_to_rApp_R1;
   const proposals = state?.proposals || [];
   const activeHint = MODES.find(m => m.key === active)?.hint || "Pick a mode to start tracking.";
+  const forecastHint = FORECAST.find(f => f.key === forecast)?.hint || "";
 
   // auto-scroll to newest ONLY when a genuinely new tick arrives AND the user is pinned to bottom.
   // (the 500ms poll re-sends the same list; keying off the newest tick stops per-poll jitter.)
@@ -168,6 +184,27 @@ export default function App() {
         )}
       </div>
 
+      {/* forecasting mode switch — same model, deterministic tool changes */}
+      <div className="flex items-center gap-2 px-5 py-2 border-b border-slate-200 shrink-0">
+        <span className="text-[11px] font-semibold uppercase tracking-wide text-slate-500 mr-1">Forecast</span>
+        <div className="inline-flex rounded-lg border border-slate-300 overflow-hidden">
+          {FORECAST.map((f, i) => {
+            const on = forecast === f.key;
+            const base = "px-3 py-1.5 text-sm font-medium transition-colors";
+            const sep = i > 0 ? "border-l border-slate-300" : "";
+            const cls = on
+              ? (f.wip ? "bg-amber-500 text-white" : "bg-indigo-600 text-white")
+              : "bg-white text-slate-700 hover:bg-slate-50";
+            return (
+              <button key={f.key} onClick={() => selectForecast(f.key)} className={`${base} ${sep} ${cls}`}>
+                {f.label}{f.wip && <span className="ml-1 text-[10px] opacity-90">WIP</span>}
+              </button>
+            );
+          })}
+        </div>
+        <div className="text-xs text-slate-500 ml-3">{forecastHint}</div>
+      </div>
+
       {esc?.pending && (
         <div className="mx-5 mt-2 p-2.5 rounded-lg bg-red-50 border border-red-200 shrink-0 flex items-center gap-3">
           <div className="text-red-700 font-semibold text-sm">⚠ {esc.reason}</div>
@@ -204,7 +241,7 @@ export default function App() {
                 {proposals.map((p, i) => (
                   <div key={p.tick} className={`px-3 py-1.5 text-[11px] ${i === proposals.length - 1 ? "bg-amber-50" : ""}`}>
                     <div className="flex justify-between font-mono text-slate-500">
-                      <span>{p.t}</span><span>#{p.tick} · {p.action}</span>
+                      <span>{p.t}</span><span>#{p.tick} · {p.action}{p.mode ? ` · ${p.mode}` : ""}</span>
                     </div>
                     <div className="font-mono text-slate-800">az {p.fan_center}° · tilt {p.tilt}°</div>
                     <div className="text-slate-500 italic leading-snug">{p.reason}</div>

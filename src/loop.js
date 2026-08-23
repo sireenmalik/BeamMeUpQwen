@@ -8,6 +8,13 @@ import { decide, MODEL_INFO } from "./model.js";
 import { validateAndFormat } from "./formatter.js";
 import { countPerBeam, beamCentroid, fanAzimuths, rangeToTilt, toPolar } from "./geometry.js";
 
+// forecasting tool modes. reactive = today's follower. lead/momentum = deterministic
+// forward projection on the SAME model. predictive = reserved for the L3 tuned model (WIP).
+export const FORECAST_MODES = ["reactive", "lead", "momentum", "predictive"];
+const LEAD_TICKS = 1.5;        // how far ahead Lead aims (tunable)
+const MOMENTUM_TICKS = 1.0;    // projection horizon for Momentum
+const UE_FLOOR = 3;            // below this many total UEs, hold (don't chase noise)
+
 export class ControlLoop {
   constructor() {
     this.crowd = new Crowd();
@@ -19,7 +26,11 @@ export class ControlLoop {
     this.lastLog = null;
     this.lastProposal = null;
     this.escalation = null;  // {pending:true} when chaos flags human gate
+    this.mode = "reactive";  // forecasting mode; set via setMode()
+    this.lastGoodFan = -10;  // last committed fan_center, for UE-floor hold
   }
+
+  setMode(m) { if (FORECAST_MODES.includes(m)) this.mode = m; return this.mode; }
 
   // detect a load split across the two edges of the fan (allocate signal)
   _splitDetected(counts) {
@@ -29,6 +40,36 @@ export class ControlLoop {
     const mid = counts[Math.floor(n / 2)] || 0;
     const tot = left + right + mid || 1;
     return left / tot > 0.3 && right / tot > 0.3 && mid / tot < 0.2;
+  }
+
+  // Deterministic aim selection based on the active forecasting mode.
+  // Returns { aim, effectiveMode } — effectiveMode may drop back to "reactive"
+  // when the confidence gate or UE floor says leading is unsafe.
+  _aimForMode(centroidAz, totalUe) {
+    const base = centroidAz;                 // reactive baseline (aim at the crowd now)
+    // UE floor: too few users -> centroid is noise. Hold the last good position.
+    if (totalUe < UE_FLOOR) {
+      return { aim: this.lastGoodFan, effectiveMode: "hold" };
+    }
+    // predictive (L3 tuned model) not wired yet -> behave as lead for now (WIP)
+    const wanted = this.mode === "predictive" ? "lead" : this.mode;
+
+    if (wanted === "reactive") {
+      return { aim: base, effectiveMode: "reactive" };
+    }
+    // lead / momentum both need consistent motion; otherwise fall back to reactive
+    if (!this.smoother.isMotionConsistent()) {
+      return { aim: base, effectiveMode: "reactive" };
+    }
+    if (wanted === "lead") {
+      return { aim: this.smoother.project(LEAD_TICKS), effectiveMode: "lead" };
+    }
+    if (wanted === "momentum") {
+      // momentum: blend the smoothed position with a shorter forward projection
+      const proj = this.smoother.project(MOMENTUM_TICKS);
+      return { aim: 0.5 * base + 0.5 * proj, effectiveMode: "momentum" };
+    }
+    return { aim: base, effectiveMode: "reactive" };
   }
 
   async stepAsync() {
@@ -42,8 +83,6 @@ export class ControlLoop {
     if (this.history.length > 6) this.history.shift();
 
     const { az: centAz, load, spread } = beamCentroid(counts, this.fanCenter);
-    // smooth the TRUE crowd bearing (computed below) — but we need trueAz first, so this
-    // smoother call is moved; see below. Keep centAz/load/spread for the KPM/R1 display.
 
     // spread-rising detection over last few ticks (chaos signal)
     let spreadRising = false;
@@ -69,7 +108,7 @@ export class ControlLoop {
     // describe the actual direction of movement (fixes "left" showing while steering right)
     const prevFanCenter = this.fanCenter;
 
-    // ONE centroid. Smooth it lightly so it isn't jumpy, then the beam aims exactly here.
+    // ONE centroid. Smooth it lightly so it isn't jumpy.
     const { az: smAz, vel } = this.smoother.update(centAzTrue);
     const beamRangeTilt = rangeToTilt(meanRange);
 
@@ -99,8 +138,12 @@ export class ControlLoop {
       load
     };
     const params = await decide(obs);
-    // Point 2 & 3: beam math derives from the centroid; beam points AT the centroid.
-    params.fan_center = this.centroid.az;
+
+    // Point 2 & 3: beam math derives from the centroid. The forecasting MODE decides
+    // whether we aim AT the crowd (reactive) or AHEAD of it (lead/momentum), via a
+    // deterministic tool step with a confidence gate + UE floor. Same model either way.
+    const { aim, effectiveMode } = this._aimForMode(this.centroid.az, load);
+    params.fan_center = +aim.toFixed(2);
     params.tilt = +beamRangeTilt.toFixed(1);
 
     // --- SMO: validate + format into A1/O1 (deterministic tool) ---
@@ -112,8 +155,8 @@ export class ControlLoop {
     // apply the committed target
     this.fanCenter = formatted.a1Policy.target.fan_center_deg;
     this.tilt = formatted.a1Policy.target.tilt_deg;
+    this.lastGoodFan = this.fanCenter;   // remember for UE-floor hold
 
-    // widen action -> visibly wider fan handled in UI via action flag
     // escalation gate for chaos
     if (params.action === "widen" && spreadRising) {
       this.escalation = { pending: true, ts, reason: "Radial dispersal detected" };
@@ -150,15 +193,24 @@ export class ControlLoop {
     this.lastProposal = params;
 
     // direction-aware reason, computed from the ACTUAL committed move (post-clamp),
-    // so the audit text always matches which way the beam went this tick.
+    // and annotated with the effective forecasting mode so the audit text is honest
+    // about whether we led, followed, or held.
     const committedFan = this.fanCenter;
+    let dir;
+    if (committedFan > prevFanCenter + 1) dir = "right";
+    else if (committedFan < prevFanCenter - 1) dir = "left";
+    else dir = "hold";
     let reasonText;
-    if (committedFan > prevFanCenter + 1) {
-      reasonText = "steering the fan right toward the count-weighted centroid";
-    } else if (committedFan < prevFanCenter - 1) {
-      reasonText = "steering the fan left toward the count-weighted centroid";
-    } else {
+    if (effectiveMode === "hold") {
+      reasonText = "holding last position, too few UEs to track reliably";
+    } else if (dir === "hold") {
       reasonText = "holding on the count-weighted centroid";
+    } else if (effectiveMode === "lead") {
+      reasonText = `leading ${dir} ahead of the crowd on steady motion`;
+    } else if (effectiveMode === "momentum") {
+      reasonText = `steering ${dir} with momentum toward the centroid`;
+    } else {
+      reasonText = `steering the fan ${dir} toward the count-weighted centroid`;
     }
 
     // rolling proposal history (oldest first, newest at end, keep last 100) with timestamps
@@ -171,6 +223,7 @@ export class ControlLoop {
       fan_center: params.fan_center,
       tilt: params.tilt,
       action: params.action,
+      mode: effectiveMode,
       reason: reasonText
     });
     if (this.proposalHistory.length > 100) this.proposalHistory.shift();
@@ -190,6 +243,7 @@ export class ControlLoop {
       beamAzimuths: fanAzimuths(this.fanCenter),
       ues: this.crowd.snapshot(),
       mode: this.crowd.mode,
+      forecastMode: this.mode,
       action: this.lastProposal?.action || "follow",
       proposals: this.proposalHistory || [],
       escalation: this.escalation,
