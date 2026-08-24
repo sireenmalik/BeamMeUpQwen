@@ -53,6 +53,8 @@ app.post("/api/chaos", (_req, res) => { loop.crowd.triggerChaos(); running = tru
 app.post("/api/escalation/clear", (_req, res) => { loop.clearEscalation(); res.json({ ok: true }); });
 // forecasting mode: reactive | lead | momentum | predictive (predictive is WIP -> behaves as lead)
 app.post("/api/mode", (req, res) => { const m = loop.setMode(req.body?.mode); res.json({ ok: true, mode: m }); });
+// arm/disarm the read-only chaos detector (armed only while Detect Chaos use case is active)
+app.post("/api/anomaly/arm", (req, res) => { const on = loop.setAnomalyArmed(req.body?.on); res.json({ ok: true, armed: on }); });
 // explicit run control: a mode turns the loop ON; turning the mode off STOPS it
 app.post("/api/run", (_req, res) => { running = true; res.json({ running }); });
 app.post("/api/stop", (_req, res) => { running = false; res.json({ running }); });

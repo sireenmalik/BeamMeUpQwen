@@ -13,7 +13,7 @@ const api = (path, body) => {
 const MODES = [
   { key: "auto",   label: "Auto Drift",   hint: "Crowd wanders randomly. Beam follows.",        color: "teal" },
   { key: "linear", label: "Crowd Linear", hint: "Click the field. Crowd walks there, beam leads.", color: "teal" },
-  { key: "chaos",  label: "Detect Chaos", hint: "Chaos / coverage-widening is a future INTENT use case.", color: "red", disabled: true },
+  { key: "chaos",  label: "Detect Chaos", hint: "Fire the burst. Detector flags radial dispersal. Beam keeps tracking.", color: "teal" },
 ];
 
 // forecasting modes for the beam: same tuned model, deterministic tool changes.
@@ -22,7 +22,7 @@ const FORECAST = [
   { key: "reactive", label: "Reactive", hint: "Aims at the crowd now. Baseline follower." },
   { key: "lead",     label: "Lead",     hint: "Aims ahead of the crowd on steady motion." },
   { key: "momentum", label: "Momentum", hint: "Momentum-smoothed lead. Steadier under motion." },
-  { key: "predictive", label: "Predictive", hint: "Learned forecast (L3 model). Work in progress.", wip: true },
+  { key: "predictive", label: "Predictive", hint: "Learned forecast (L3 model). Work in progress.", wip: true, disabled: true },
 ];
 
 function ModeButton({ label, on, color, onClick, disabled }) {
@@ -59,12 +59,14 @@ function KVPanel({ title, rows, tone }) {
 export default function App() {
   const [state, setState] = useState(null);
   const [active, setActive] = useState(null); // 'auto' | 'linear' | 'chaos' | null
-  const [forecast, setForecast] = useState("reactive");
+  const [forecast, setForecast] = useState("momentum");
   const activeRef = useRef(null);
   activeRef.current = active;
 
   const refresh = useCallback(async () => { try { setState(await api("/api/state")); } catch {} }, []);
   useEffect(() => { refresh(); const id = setInterval(refresh, 500); return () => clearInterval(id); }, [refresh]);
+  // set the default forecasting mode (momentum) on the backend once at load
+  useEffect(() => { api("/api/mode", { mode: "momentum" }); }, []);
 
   // ---- proposals scroll: pin to bottom unless the user has scrolled up ----
   const scrollRef = useRef(null);
@@ -87,18 +89,22 @@ export default function App() {
     if (active === which) {
       // turn the active one OFF -> STOP the loop (clean off: no ticks, beam frozen)
       setActive(null);
+      api("/api/anomaly/arm", { on: false }); // leaving any use case disarms + clears the banner
       api("/api/stop");
     } else {
       // switch to this mode; others turn off automatically (single active value)
       setActive(which);
-      if (which === "auto")   api("/api/auto");    // starts loop + wander
+      // arm the chaos detector ONLY in Detect Chaos; disarm (and clear banner) otherwise
+      api("/api/anomaly/arm", { on: which === "chaos" });
+      if (which === "auto")   { api("/api/auto"); }    // starts loop + wander
       if (which === "linear") { api("/api/idle"); api("/api/run"); } // run; click sets target
-      if (which === "chaos")  { api("/api/idle"); api("/api/run"); } // run; press Burst to disperse
+      if (which === "chaos")  { api("/api/auto"); api("/api/run"); } // crowd auto-drifts; press Burst to disperse
     }
   };
 
   const selectForecast = (key) => {
-    setForecast(key);          // reflect selection immediately (predictive shows as WIP but is selectable)
+    if (FORECAST.find(f => f.key === key)?.disabled) return; // predictive WIP is not selectable
+    setForecast(key);
     api("/api/mode", { mode: key });
   };
 
@@ -152,6 +158,43 @@ export default function App() {
     setShowJump(false);
   };
 
+  // --- chaos banner blink control: show while armed+active, blink up to 20 times, then hide ---
+  const anomaly = state?.anomaly;
+  const [blinkOn, setBlinkOn] = useState(false);
+  const blinksDoneRef = useRef(0);
+  const anomalyTickRef = useRef(0);
+  const [bannerVisible, setBannerVisible] = useState(false);
+
+  // when a NEW anomaly event arrives (new tick), reset the blink counter and show it
+  useEffect(() => {
+    if (anomaly?.active && anomaly.tick !== anomalyTickRef.current) {
+      anomalyTickRef.current = anomaly.tick;
+      blinksDoneRef.current = 0;
+      setBannerVisible(true);
+    }
+    // if the anomaly was cleared server-side (use-case switch), hide immediately
+    if (!anomaly && bannerVisible) {
+      setBannerVisible(false);
+      blinksDoneRef.current = 0;
+    }
+  }, [anomaly, bannerVisible]);
+
+  // drive the blink: toggle every 400ms, count on-cycles, stop after 20
+  useEffect(() => {
+    if (!bannerVisible) { setBlinkOn(false); return; }
+    const id = setInterval(() => {
+      setBlinkOn(prev => {
+        const next = !prev;
+        if (next) { // count each time it turns ON
+          blinksDoneRef.current += 1;
+          if (blinksDoneRef.current >= 20) { setBannerVisible(false); }
+        }
+        return next;
+      });
+    }, 400);
+    return () => clearInterval(id);
+  }, [bannerVisible]);
+
   return (
     <div className="h-screen flex flex-col text-slate-800 bg-white overflow-hidden">
       <header className="flex items-center justify-between px-5 py-2.5 border-b border-slate-200 shrink-0">
@@ -167,6 +210,12 @@ export default function App() {
          <span className="ml-1.5 px-1.5 py-0.5 rounded bg-teal-600 text-white text-[10px] font-semibold tracking-wide">LoRA TUNED</span>
          <span className="text-slate-500"> · tick {state?.tick ?? "—"}</span>
          </div>
+         {active === "chaos" && (
+           <button onClick={triggerBurst}
+             className="ml-4 px-4 py-1.5 rounded-lg text-sm font-bold bg-red-600 text-white hover:bg-red-700 shadow-sm shrink-0">
+             💥 Trigger Burst
+           </button>
+         )}
       </header>
 
       {/* three fixed-position mode buttons — positions never change, only ON/OFF state */}
@@ -176,12 +225,6 @@ export default function App() {
             on={active === m.key} onClick={() => selectMode(m.key)} />
         ))}
         <div className="text-xs text-slate-500 ml-3">{activeHint}</div>
-        {active === "chaos" && (
-          <button onClick={triggerBurst}
-            className="ml-auto px-4 py-1.5 rounded-lg text-sm font-bold bg-red-600 text-white hover:bg-red-700 shadow-sm">
-            💥 Trigger Burst
-          </button>
-        )}
       </div>
 
       {/* forecasting mode switch — same model, deterministic tool changes */}
@@ -192,11 +235,14 @@ export default function App() {
             const on = forecast === f.key;
             const base = "px-3 py-1.5 text-sm font-medium transition-colors";
             const sep = i > 0 ? "border-l border-slate-300" : "";
-            const cls = on
-              ? (f.wip ? "bg-amber-500 text-white" : "bg-indigo-600 text-white")
-              : "bg-white text-slate-700 hover:bg-slate-50";
+            const cls = f.disabled
+              ? "bg-slate-100 text-slate-400 cursor-not-allowed"
+              : on
+                ? "bg-teal-600 text-white"                       // active = green
+                : "bg-white text-slate-700 hover:bg-slate-50";
             return (
-              <button key={f.key} onClick={() => selectForecast(f.key)} className={`${base} ${sep} ${cls}`}>
+              <button key={f.key} onClick={() => selectForecast(f.key)} disabled={f.disabled}
+                className={`${base} ${sep} ${cls}`}>
                 {f.label}{f.wip && <span className="ml-1 text-[10px] opacity-90">WIP</span>}
               </button>
             );
@@ -214,7 +260,16 @@ export default function App() {
       )}
 
       <div className="flex-1 min-h-0 flex flex-col gap-3 p-4 overflow-hidden">
-        <div className="flex-[3] min-h-0 bg-slate-50 rounded-2xl border border-slate-200 p-3 flex items-center justify-center overflow-hidden">
+        <div className="relative flex-[3] min-h-0 bg-slate-50 rounded-2xl border border-slate-200 p-3 flex items-center justify-center overflow-hidden">
+          {bannerVisible && (
+            <div className="absolute left-0 top-0 bottom-0 w-1/3 flex flex-col items-center justify-center pointer-events-none z-10 px-4">
+              <div className={`text-center transition-opacity duration-150 ${blinkOn ? "opacity-100" : "opacity-10"}`}>
+                <div className="text-5xl mb-2">⚠</div>
+                <div className="text-2xl font-extrabold tracking-wide text-red-600 leading-tight uppercase">Crowd Chaos<br/>Detected</div>
+                <div className="mt-2 text-xs font-semibold uppercase tracking-widest text-red-500">Radial dispersal · detection only</div>
+              </div>
+            </div>
+          )}
           <Radar state={state} mode={active === "linear" ? "walk" : "idle"} onWalk={onWalk} onSplit={() => {}} />
         </div>
 

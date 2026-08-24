@@ -26,11 +26,26 @@ export class ControlLoop {
     this.lastLog = null;
     this.lastProposal = null;
     this.escalation = null;  // {pending:true} when chaos flags human gate
-    this.mode = "reactive";  // forecasting mode; set via setMode()
+    this.mode = "momentum"; // forecasting mode; set via setMode() — momentum is the default
     this.lastGoodFan = -10;  // last committed fan_center, for UE-floor hold
+    // --- chaos detector (read-only observer; never touches the beam path) ---
+    this.prevSpreadR = null;   // last tick's spatial spread radius, for rate-of-rise
+    this.anomaly = null;       // {active, blinksLeft, pattern, tick} when chaos flagged
+    this.anomalyArmed = false; // detector only watches while Detect Chaos use case is active
+    this.anomalyFiring = false;// true while one event is ongoing, so we don't re-trigger every tick
   }
 
   setMode(m) { if (FORECAST_MODES.includes(m)) this.mode = m; return this.mode; }
+
+  // arm the chaos detector ONLY while the Detect Chaos use case is active.
+  // arming/disarming also clears any visible anomaly (switching use case wipes the banner).
+  setAnomalyArmed(on) {
+    this.anomalyArmed = !!on;
+    this.anomaly = null;
+    this.anomalyFiring = false;
+    this.prevSpreadR = null;
+    return this.anomalyArmed;
+  }
 
   // detect a load split across the two edges of the fan (allocate signal)
   _splitDetected(counts) {
@@ -103,6 +118,25 @@ export class ControlLoop {
     let spreadR = 0;
     for (const u of ues) spreadR += (u.x - cx) ** 2 + (u.y - cy) ** 2;
     spreadR = ues.length ? Math.sqrt(spreadR / ues.length) : 8;
+
+    // --- CHAOS DETECTOR (read-only; armed only in Detect Chaos use case) ---
+    // Watches the rate-of-rise of the spatial spread radius. Radial dispersal (a burst)
+    // makes spreadR balloon while the centroid stays roughly put. This sets a blinking
+    // flag ONLY. It does not touch params, the beam, or the loop. If removed, nothing
+    // about tracking changes.
+    if (this.anomalyArmed) {
+      const rise = this.prevSpreadR === null ? 0 : (spreadR - this.prevSpreadR);
+      const DISPERSAL_RISE = 6; // meters/tick of spread growth that counts as "fanning out"
+      if (rise > DISPERSAL_RISE && !this.anomalyFiring) {
+        // fresh event -> arm a bounded 20-blink banner
+        this.anomaly = { active: true, blinksLeft: 20, pattern: "dispersal", tick: this.tick };
+        this.anomalyFiring = true;
+      } else if (rise <= 1 && this.anomalyFiring && (!this.anomaly || !this.anomaly.active)) {
+        // spread settled AND banner finished -> re-arm so a later burst can fire again
+        this.anomalyFiring = false;
+      }
+    }
+    this.prevSpreadR = spreadR;
 
     // capture the beam position BEFORE this tick's update, so the reason text can
     // describe the actual direction of movement (fixes "left" showing while steering right)
@@ -244,6 +278,8 @@ export class ControlLoop {
       ues: this.crowd.snapshot(),
       mode: this.crowd.mode,
       forecastMode: this.mode,
+      anomaly: this.anomaly,
+      anomalyArmed: this.anomalyArmed,
       action: this.lastProposal?.action || "follow",
       proposals: this.proposalHistory || [],
       escalation: this.escalation,
