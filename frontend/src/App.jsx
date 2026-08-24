@@ -31,10 +31,10 @@ function ModeButton({ label, on, color, onClick, disabled }) {
   const disabledCls = "bg-slate-100 text-slate-400 border-slate-200 cursor-not-allowed";
   return (
     <button onClick={disabled ? undefined : onClick} disabled={disabled}
-      className={`w-40 shrink-0 px-3 py-1.5 rounded-lg text-sm font-medium border transition-colors ${disabled ? disabledCls : (on ? onCls : offCls)}`}>
-      <span className={`inline-block w-2 h-2 rounded-full mr-2 align-middle ${disabled ? "bg-slate-300" : (on ? "bg-white" : "bg-slate-300")}`} />
+      className={`shrink-0 px-2.5 py-1 rounded-md text-xs font-medium border transition-colors ${disabled ? disabledCls : (on ? onCls : offCls)}`}>
+      <span className={`inline-block w-1.5 h-1.5 rounded-full mr-1.5 align-middle ${disabled ? "bg-slate-300" : (on ? "bg-white" : "bg-slate-300")}`} />
       {label}
-      <span className="ml-1 opacity-80">· {disabled ? "SOON" : (on ? "ON" : "OFF")}</span>
+      <span className="ml-1 opacity-70">{disabled ? "SOON" : (on ? "ON" : "OFF")}</span>
     </button>
   );
 }
@@ -197,10 +197,10 @@ export default function App() {
 
   return (
     <div className="h-screen flex flex-col text-slate-800 bg-white overflow-hidden">
-      <header className="flex items-center justify-between px-5 py-2.5 border-b border-slate-200 shrink-0">
+      <header className="flex items-center justify-between px-4 py-1.5 border-b border-slate-200 shrink-0">
         <div>
-          <h1 className="text-lg font-bold text-slate-900 leading-tight">Crowd-Following Beam</h1>
-          <p className="text-[11px] text-slate-500">LLM rApp · gNB → SMO → rApp loop · digital beam steering</p>
+          <h1 className="text-sm font-bold text-slate-900 leading-tight">Crowd-Following Beam</h1>
+          <p className="text-[10px] text-slate-500 leading-tight">LLM rApp · gNB → SMO → rApp loop</p>
         </div>
         <div className="text-[11px] text-slate-500 text-right">
           <span className={`inline-block px-2 py-0.5 rounded-full text-[10px] font-semibold mr-2 ${state?.running ? "bg-teal-100 text-teal-700" : "bg-slate-200 text-slate-500"}`}>
@@ -218,37 +218,31 @@ export default function App() {
          )}
       </header>
 
-      {/* three fixed-position mode buttons — positions never change, only ON/OFF state */}
-      <div className="flex items-center gap-2 px-5 py-2 border-b border-slate-200 shrink-0">
+      {/* single compact control row: use-case modes + forecast switch */}
+      <div className="flex items-center gap-2 px-4 py-1.5 border-b border-slate-200 shrink-0 flex-wrap">
         {MODES.map(m => (
           <ModeButton key={m.key} label={m.label} color={m.color} disabled={m.disabled}
             on={active === m.key} onClick={() => selectMode(m.key)} />
         ))}
-        <div className="text-xs text-slate-500 ml-3">{activeHint}</div>
-      </div>
-
-      {/* forecasting mode switch — same model, deterministic tool changes */}
-      <div className="flex items-center gap-2 px-5 py-2 border-b border-slate-200 shrink-0">
-        <span className="text-[11px] font-semibold uppercase tracking-wide text-slate-500 mr-1">Forecast</span>
-        <div className="inline-flex rounded-lg border border-slate-300 overflow-hidden">
+        <span className="mx-1 text-slate-300">|</span>
+        <span className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">Forecast</span>
+        <div className="inline-flex rounded-md border border-slate-300 overflow-hidden">
           {FORECAST.map((f, i) => {
             const on = forecast === f.key;
-            const base = "px-3 py-1.5 text-sm font-medium transition-colors";
+            const base = "px-2.5 py-1 text-xs font-medium transition-colors";
             const sep = i > 0 ? "border-l border-slate-300" : "";
             const cls = f.disabled
               ? "bg-slate-100 text-slate-400 cursor-not-allowed"
-              : on
-                ? "bg-teal-600 text-white"                       // active = green
-                : "bg-white text-slate-700 hover:bg-slate-50";
+              : on ? "bg-teal-600 text-white" : "bg-white text-slate-700 hover:bg-slate-50";
             return (
               <button key={f.key} onClick={() => selectForecast(f.key)} disabled={f.disabled}
                 className={`${base} ${sep} ${cls}`}>
-                {f.label}{f.wip && <span className="ml-1 text-[10px] opacity-90">WIP</span>}
+                {f.label}{f.wip && <span className="ml-1 text-[9px] opacity-90">WIP</span>}
               </button>
             );
           })}
         </div>
-        <div className="text-xs text-slate-500 ml-3">{forecastHint}</div>
+        <div className="text-[11px] text-slate-500 ml-2 truncate">{active === "chaos" ? activeHint : forecastHint}</div>
       </div>
 
       {esc?.pending && (
@@ -259,8 +253,8 @@ export default function App() {
         </div>
       )}
 
-      <div className="flex-1 min-h-0 flex flex-col gap-3 p-4 overflow-hidden">
-        <div className="relative flex-[3] min-h-0 bg-slate-50 rounded-2xl border border-slate-200 p-3 flex items-center justify-center overflow-hidden">
+      <div className="flex-1 min-h-0 flex flex-col gap-2 p-2.5 overflow-hidden">
+        <div className="relative flex-[7] min-h-0 bg-slate-50 rounded-2xl border border-slate-200 p-2 flex items-center justify-center overflow-hidden">
           {bannerVisible && (
             <div className="absolute left-0 top-0 bottom-0 w-1/3 flex flex-col items-center justify-center pointer-events-none z-10 px-4">
               <div className={`text-center transition-opacity duration-150 ${blinkOn ? "opacity-100" : "opacity-10"}`}>
@@ -273,7 +267,7 @@ export default function App() {
           <Radar state={state} mode={active === "linear" ? "walk" : "idle"} onWalk={onWalk} onSplit={() => {}} />
         </div>
 
-        <div className="flex-[2] min-h-0 grid grid-cols-3 gap-3 overflow-hidden">
+        <div className="flex-[3] min-h-0 grid grid-cols-3 gap-2 overflow-hidden">
           <KVPanel title="gNB → SMO · KPM (counts)" tone="slate" rows={[
             ["beams", kpm ? `[${kpm.beam_counts.join(", ")}]` : "—"],
             ["total UE", kpm?.total_ue ?? "—"],
@@ -314,7 +308,7 @@ export default function App() {
         </div>
       </div>
 
-      <footer className="text-[10px] text-slate-400 px-5 py-1.5 border-t border-slate-200 shrink-0">
+      <footer className="text-[9px] text-slate-400 px-4 py-1 border-t border-slate-200 shrink-0">
         Digital beam steering, not mechanical RET · chaos detection reads the crowd's response, not gunfire · reversible actions auto, irreversible human-gated.
       </footer>
     </div>

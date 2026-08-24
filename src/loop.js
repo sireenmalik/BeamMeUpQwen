@@ -125,14 +125,28 @@ export class ControlLoop {
     // flag ONLY. It does not touch params, the beam, or the loop. If removed, nothing
     // about tracking changes.
     if (this.anomalyArmed) {
-      const rise = this.prevSpreadR === null ? 0 : (spreadR - this.prevSpreadR);
-      const DISPERSAL_RISE = 6; // meters/tick of spread growth that counts as "fanning out"
-      if (rise > DISPERSAL_RISE && !this.anomalyFiring) {
-        // fresh event -> arm a bounded 20-blink banner
-        this.anomaly = { active: true, blinksLeft: 20, pattern: "dispersal", tick: this.tick };
+      // Detect radial dispersal from TELEMETRY ONLY: the crowd is fanning out (spreadR
+      // growing) AND that expansion is accelerating (velocity of the fan-out). No knowledge
+      // of any trigger/pop/mode — purely the measured movement pattern.
+      const expandRate = this.prevSpreadR === null ? 0 : (spreadR - this.prevSpreadR); // m/tick, how fast it's fanning out
+      this.expandHist = this.expandHist || [];
+      this.expandHist.push(expandRate);
+      if (this.expandHist.length > 4) this.expandHist.shift();
+      // velocity change = is the fan-out rate now well above its recent baseline?
+      const baseline = this.expandHist.slice(0, -1);
+      const baseAvg = baseline.length ? baseline.reduce((a, b) => a + b, 0) / baseline.length : 0;
+      const accel = expandRate - baseAvg; // rise in the expansion velocity (acceleration of fan-out)
+
+      // pattern = fanning out (positive expansion) with a clear velocity increase
+      const FANOUT = 1.5;   // m/tick minimum outward expansion to count as "fanning out"
+      const ACCEL  = 1.0;   // m/tick jump in expansion rate = the velocity change
+      const patternDetected = expandRate > FANOUT && accel > ACCEL;
+
+      if (patternDetected && !this.anomalyFiring) {
+        this.anomaly = { active: true, blinksLeft: 20, pattern: "radial_dispersal", tick: this.tick };
         this.anomalyFiring = true;
-      } else if (rise <= 1 && this.anomalyFiring && (!this.anomaly || !this.anomaly.active)) {
-        // spread settled AND banner finished -> re-arm so a later burst can fire again
+      } else if (expandRate <= 0.3 && this.anomalyFiring && (!this.anomaly || !this.anomaly.active)) {
+        // fan-out has stopped AND banner finished -> re-arm for the next distinct event
         this.anomalyFiring = false;
       }
     }
