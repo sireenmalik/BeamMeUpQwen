@@ -17,7 +17,7 @@ const MODES = [
 ];
 
 // forecasting modes for the beam: same tuned model, deterministic tool changes.
-// predictive is the L3 tuned model — WIP, currently falls back to lead.
+// predictive is the L3 tuned model — WIP, disabled and not selectable.
 const FORECAST = [
   { key: "reactive", label: "Reactive", hint: "Aims at the crowd now. Baseline follower." },
   { key: "lead",     label: "Lead",     hint: "Aims ahead of the crowd on steady motion." },
@@ -129,7 +129,7 @@ export default function App() {
 
   const esc = state?.escalation;
   const model = state?.model;
-  const kpm = log?.gNB_to_SMO_KPM;
+  const o1  = log?.gNB_to_SMO_O1;
   const r1 = log?.SMO_to_rApp_R1;
   const proposals = state?.proposals || [];
   const activeHint = MODES.find(m => m.key === active)?.hint || "Pick a mode to start tracking.";
@@ -268,16 +268,17 @@ export default function App() {
         </div>
 
         <div className="flex-[3] min-h-0 grid grid-cols-3 gap-2 overflow-hidden">
-          <KVPanel title="gNB → SMO · KPM (counts)" tone="slate" rows={[
-            ["beams", kpm ? `[${kpm.beam_counts.join(", ")}]` : "—"],
-            ["total UE", kpm?.total_ue ?? "—"],
-            ["schema", "e2sm-kpm.v1"],
+          <KVPanel title="gNodeB → SMO · O1 · TS 28.552" tone="slate" rows={[
+            ["SS.RSRP per SSB", o1 ? `[${o1["SS.RSRP_perSSB_dBm"].join(", ")}] dBm` : "—"],
+            ["RRC.ConnMean", o1?.["RRC.ConnMean"] ?? "—"],
+            ["beam azimuths", o1 ? `[${o1.beam_azimuths.join(", ")}]°` : "—"],
+            ["format", "VES · JSON over REST"],
           ]} />
-          <KVPanel title="SMO → rApp · R1 (features)" tone="teal" rows={[
-            ["centroid az", r1 ? `${r1.centroid_az}°` : "—"],
-            ["centroid range", state?.centroid ? `${state.centroid.range} m` : "—"],
-            ["centroid X", state?.centroid ? `${state.centroid.x} m` : "—"],
-            ["centroid Y", state?.centroid ? `${state.centroid.y} m` : "—"],
+          <KVPanel title="SMO → rApp · R1 · DME" tone="teal" rows={[
+            ["RSRP-weighted az", r1 ? `${r1.rsrp_weighted_az}°` : "—"],
+            ["cell UE total", r1?.cell_ue_total ?? "—"],
+            ["current fan_center", r1?.current ? `${r1.current.fan_center_deg}°` : "—"],
+            ["current tilt", r1?.current ? `${r1.current.tilt_deg}°` : "—"],
             ["velocity", r1 ? `${r1.centroid_vel}°/tick` : "—"],
             ["spread", r1 ? `${r1.spread}°` : "—"],
             ["spread rising", r1 ? String(r1.spread_rising) : "—"],
@@ -292,7 +293,18 @@ export default function App() {
                     <div className="flex justify-between font-mono text-slate-500">
                       <span>{p.t}</span><span>#{p.tick} · {p.action}{p.mode ? ` · ${p.mode}` : ""}</span>
                     </div>
-                    <div className="font-mono text-slate-800">az {p.fan_center}° · tilt {p.tilt}°</div>
+                    <div className="font-mono text-slate-800">
+                      az {p.fan_center}° · tilt {p.tilt}°
+                      {p.source === "model" && <span className="ml-2 text-emerald-700 not-italic">← LLM</span>}
+                      {p.source === "model-clamped" && <span className="ml-2 text-amber-700 not-italic">← LLM (clamped)</span>}
+                      {p.source === "model-partial" && <span className="ml-2 text-amber-700 not-italic">← LLM (tilt sub.)</span>}
+                      {p.source === "no-decision" && <span className="ml-2 text-red-600 not-italic">← no decision · held</span>}
+                      {p.source === "hold" && <span className="ml-2 text-slate-500 not-italic">← hold (UE floor)</span>}
+                    </div>
+                    {p.proposedFan != null && p.proposedFan !== p.fan_center && (
+                      <div className="font-mono text-[10px] text-amber-700">LLM asked az {p.proposedFan}° · fenced to {p.fan_center}°</div>
+                    )}
+                    {p.guard && <div className="text-[10px] text-amber-700 leading-snug">⚠ {p.guard}</div>}
                     <div className="text-slate-500 italic leading-snug">{p.reason}</div>
                   </div>
                 ))}

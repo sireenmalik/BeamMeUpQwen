@@ -27,29 +27,54 @@ Only **five files** differ between the two repos:
 - `requirements.txt` (new): Python deps for `serve.py`
 - `README.md`: this file
 
-Everything else (the entire Node/Express backend, the Vite/React radar UI, the deterministic formatter, the Kalman smoother, the policy engine) is byte-for-byte identical to `beammeup`. That is deliberate. A `diff` between the two repos is the story.
+Everything else (the entire Node/Express backend, the Vite/React radar UI, the deterministic formatter, the Kalman smoother, the policy engine) was byte-for-byte identical to `beammeup`. That was deliberate: a `diff` between the two repos was the story.
+
+**Current status of that claim.** This repo has since moved ahead of `beammeup` on the
+sensing layer: the gNodeB now measures `SS-RSRP per SSB` instead of synthetic per-beam
+counts, and `geometry.js`, `loop.js`, `model.js`, `App.jsx` and `Radar.jsx` differ as a
+result. The forecasting modes and the crowd-anomaly safety use case also live here first.
+Porting the RSRP sensing back to `beammeup` restores the clean five-file diff; until then
+the two repos differ in sensing as well as backbone.
 
 ## Architecture
 
 Three layer separation, LLM proposes values, deterministic tool builds SMO wire messages, SMO applies. Non-determinism is fenced inside the tool boundary. SMO only ever receives clamped numeric setpoints.
 
 ```
-per-beam counts (from RIC/E2)
+SS-RSRP per SSB beam  +  cell UE count      (gNodeB -> SMO, O1, 3GPP TS 28.552)
+      ↓
+SMO exposes to the rApp                     (R1, Data Management & Exposure)
+      ↓
+Pre-loop harness (deterministic)
+   ├─ UE floor: too few users -> hold last good position
+   └─ RSRP-weighted centroid: where the RF demand actually sits
       ↓
 LLM (Qwen 2.5 + LoRA adapter, running in serve.py on localhost:8000)
       ↓  values envelope (JSON)
       ↓  { fan_center, tilt, action, reason }
       ↓
-Deterministic tool (existing beammeup code, unchanged)
+Deterministic tool (formatter)
    ├─ parse and schema check
    ├─ clamp fan_center to -49..49, tilt to 3..45
    ├─ Kalman smoother (smoothing only, no decisions)
+   ├─ forecasting mode applies the aim (reactive / lead / momentum)
    ├─ drop reason to audit log
-   ├─ map action to SMO endpoint
    └─ build SMO wire JSON
       ↓
-Radar UI (Vite/React/Tailwind, existing beammeup frontend)
+SMO -> gNodeB                               (O1, NETCONF/YANG, 3GPP TS 28.541)
+      ↓
+Radar UI (Vite/React/Tailwind)
 ```
+
+**On the sensing.** Earlier versions fed the model per-beam UE counts. That is not a real
+measurement: 3GPP defines no per-beam active-UE counter over O1. What a gNodeB actually
+reports is `SS-RSRP distribution per SSB` (per beam) and an active/connected UE count
+(per cell). The simulator now models RSRP properly, using 3GPP TR 38.901 UMi-LOS path
+loss, a cos^2 antenna pattern, log-normal shadow fading, and TS 38.133 quantization.
+The steering signal is the RSRP-weighted azimuth. The per-cell UE count is the load gate.
+
+A per-beam UE membership figure is still derived and displayed, but it is labelled as
+derived — it is not claimed as a standard counter.
 
 ## Install
 
@@ -99,6 +124,23 @@ npm start
 
 Open the browser: [http://localhost:3000](http://localhost:3000)
 
+### Running without the model
+
+The rApp runs standalone with a deterministic forecaster, no Python side needed:
+
+```bash
+MODEL_PROVIDER=none npm start
+```
+
+This exercises the full loop — RSRP sensing, the RSRP-weighted centroid, the forecasting
+modes, the crowd-anomaly detector, the signaling log and the radar — with the model call
+replaced by arithmetic. Useful for verifying a change to the loop in isolation before
+bringing the adapter into it.
+
+Note on naming: `MODEL_PROVIDER=openai` means *an OpenAI-compatible endpoint*, which is
+what `serve.py` exposes on localhost. It does not mean the OpenAI API. Nothing leaves the
+laptop on that setting.
+
 Drag the crowd. Watch the beam follow. Watch the signaling log show `rApp_proposal` per tick with the reason field filled by your locally trained adapter.
 
 ## Training the adapter (how `beam-lora/` was made)
@@ -125,6 +167,11 @@ For the audiences it is aimed at:
 Honest gaps between this proof and a production rApp:
 
 - **Accuracy at scale**: 30 synthetic ticks proved the pipeline. Real crowd behavior across sectors, weather, and events not yet validated.
+- **Adapter is trained on the old input format**: `beam-lora/` was fine-tuned on per-beam
+  *counts*. The loop now feeds the model per-beam *RSRP*. Until the adapter is retrained on
+  RSRP examples, it is being asked to read an input distribution it has never seen. This does
+  not crash anything — `parseParams` falls back to the deterministic path on a bad generation —
+  but steering quality from the adapter should be treated as unvalidated until the retrain.
 - **Robustness to novel inputs**: adapter learned the synthetic pattern. Radial dispersal, sensor dropouts, and adversarial patterns will look novel until the training set covers them.
 - **End to end safety wiring**: policy engine exists in the formatter. Signed audit log and dry-run gating still to add.
 - **TMF Level 4 certification**: this is enabling infrastructure, not the audited product. Alignment with TMF IG1253 and IG1326 still to do.

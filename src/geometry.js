@@ -73,3 +73,92 @@ export function beamCentroid(counts, fanCenter) {
   const spread = Math.sqrt(sv / sw);
   return { az, load: sw, spread };
 }
+// Real RF sensing: per-beam SS-RSRP.
+//
+// This replaces countPerBeam() as the gNB's measurement. A real gNodeB cannot
+// count UEs per beam (no such standard counter exists). What it DOES report is
+// SS-RSRP per SSB beam (3GPP TS 28.552) plus a cell-level UE count.
+//
+// Physics: 3GPP TR 38.901 UMi-Street-Canyon LOS path loss, a cos^2 antenna
+// pattern, log-normal shadow fading, quantized to the TS 38.133 reporting range.
+//
+// countPerBeam() is left in place — nothing else that uses it breaks.
+
+export const FC_GHZ       = 3.5;   // mid-band carrier
+export const P_TX_DBM     = 18;    // per-SSB transmit power (dBm)
+export const G_MAX_DBI    = 15;    // peak beam gain at boresight
+export const SF_SIGMA_DB  = 4;     // TR 38.901 UMi-LOS shadow fading sigma
+export const RSRP_MIN     = -156;  // TS 38.133 reportable floor (dBm)
+export const RSRP_MAX     = -31;   // TS 38.133 reportable ceiling (dBm)
+
+// 3GPP TR 38.901 UMi-Street-Canyon LOS path loss (dB). d in metres, fc in GHz.
+export function pathLoss38901(d) {
+  const dd = Math.max(1, d);
+  return 32.4 + 21 * Math.log10(dd) + 20 * Math.log10(FC_GHZ);
+}
+
+// cos^2 beam pattern gain (dB) relative to boresight, with a side-lobe floor.
+function beamGainDb(azOffsetDeg) {
+  const off = Math.min(90, Math.abs(azOffsetDeg));
+  const lin = Math.pow(Math.cos(off * Math.PI / 180), 2);
+  return G_MAX_DBI + 10 * Math.log10(Math.max(1e-3, lin));   // ~ -15 dB floor
+}
+
+function gaussianNoise(sigma) {
+  let u = 0, v = 0;
+  while (u === 0) u = Math.random();
+  while (v === 0) v = Math.random();
+  return sigma * Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+}
+
+// Quantize to TS 38.133 integer dBm levels (1 dB steps), clamped to reportable range.
+function quantizeRsrp(dbm) {
+  return Math.max(RSRP_MIN, Math.min(RSRP_MAX, Math.round(dbm)));
+}
+
+// The gNB's sensing. For each UE compute RSRP on every beam, assign the UE to its
+// best (serving) beam, and report per-beam aggregate RSRP plus beam membership.
+//
+// Returns { rsrp: [dBm x N], members: [count x N], azimuths: [deg x N] }
+//   rsrp     -> SS-RSRP per SSB  (the standard per-beam quantity)
+//   members  -> how many UEs each beam serves (derived, NOT a standard counter)
+//   azimuths -> where each beam currently points (from our own commanded state)
+export function rsrpPerBeam(ues, fanCenter) {
+  const azs = fanAzimuths(fanCenter);
+  const N = azs.length;
+  const linSum  = new Array(N).fill(0);
+  const members = new Array(N).fill(0);
+
+  for (const u of ues) {
+    const { az, range } = toPolar(u.x, u.y);
+    const d3d = Math.hypot(range, TOWER_H);          // 3D distance incl. tower height
+    const pl  = pathLoss38901(d3d);
+    const sf  = gaussianNoise(SF_SIGMA_DB);          // one shadow draw per UE
+
+    let bestB = 0, bestR = -Infinity;
+    for (let b = 0; b < N; b++) {
+      const rsrp = P_TX_DBM - pl + beamGainDb(az - azs[b]) + sf;
+      if (rsrp > bestR) { bestR = rsrp; bestB = b; }
+    }
+    members[bestB]++;
+    linSum[bestB] += Math.pow(10, bestR / 10);        // aggregate in linear power
+  }
+
+  const rsrp = new Array(N).fill(RSRP_MIN);
+  for (let b = 0; b < N; b++) {
+    if (members[b] > 0) rsrp[b] = quantizeRsrp(10 * Math.log10(linSum[b] / members[b]));
+  }
+  return { rsrp, members, azimuths: azs.map(a => +a.toFixed(1)) };
+}
+
+// RSRP-weighted azimuth: where the RF demand actually sits.
+// This is the steering signal. Linear power weights, NOT dBm (dBm is logarithmic
+// and cannot be averaged directly). Beams with no served UE are excluded.
+export function rsrpCentroid(rsrp, fanCenter) {
+  const azs = fanAzimuths(fanCenter);
+  const lin = rsrp.map(r => (r <= RSRP_MIN ? 0 : Math.pow(10, r / 10)));
+  const tot = lin.reduce((a, b) => a + b, 0);
+  if (tot <= 0) return { az: fanCenter, profile: lin.map(() => 0) };
+  const az = lin.reduce((s, w, i) => s + w * azs[i], 0) / tot;
+  return { az, profile: lin.map(w => +(w / tot).toFixed(4)) };
+}

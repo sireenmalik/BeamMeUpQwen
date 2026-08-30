@@ -48,13 +48,13 @@ export default function Radar({ state, mode, onWalk, onSplit }) {
   const beamAz = state?.beamAzimuths || [];
   const crowd = state?.centroid || { az: 0, range: 60 };
 
-  // --- beam footprint centered ON the crowd ---
-  // Beamwidths grow with the crowd's spatial spread so the beam covers them as they scatter.
-  const spreadR = crowd.spreadR || 8;                 // crowd radius in meters
-  const spreadDeg = Math.min(40, (spreadR / (crowd.range || 60)) * 180 / Math.PI); // angular half-spread
-  const EL_BW = Math.min(28, 6 + spreadR * 0.35);     // elevation beamwidth grows with spread
-  const AZ_BW = Math.min(70, 16 + spreadDeg * 1.6);    // azimuth beamwidth grows with spread
-  const centerRange = crowd.range || tiltToRange(tilt);
+  // --- beam footprint drawn from the COMMANDED beam config ---
+  // Honesty rule: the picture must come from what the rApp commanded (fan_center + tilt),
+  // not from the simulator's private knowledge of the crowd's true spread. A real SMO
+  // only knows what it configured. Widening on `action` is a commanded state, so it stays.
+  const EL_BW = action === "widen" ? 14 : 8;          // elevation beamwidth, deg
+  const AZ_BW = action === "widen" ? 52 : 34;         // fan angular coverage, deg
+  const centerRange = tiltToRange(tilt);              // range follows the commanded tilt
   const theta = rangeToTilt(centerRange);
   const physFar = TOWER_H / Math.tan(Math.max(2, theta - EL_BW / 2) * Math.PI / 180);
   const physNear = TOWER_H / Math.tan(Math.min(80, theta + EL_BW / 2) * Math.PI / 180);

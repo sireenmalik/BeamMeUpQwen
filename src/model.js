@@ -2,7 +2,7 @@
 // The formatter tool turns those into JSON. Endpoint chosen by env:
 //
 //   MODEL_PROVIDER = anthropic | openai | none   (default: none -> deterministic)
-//   MODEL_ENDPOINT = base url for openai-compatible servers (Nemotron via NIM, Qwen, vLLM)
+//   MODEL_ENDPOINT = base url for the local OpenAI-compatible server (serve.py / Ollama)
 //   MODEL_NAME     = model id
 //   MODEL_API_KEY  = key (anthropic or openai-compatible)
 //
@@ -13,9 +13,9 @@ const PROVIDER = (process.env.MODEL_PROVIDER || "none").toLowerCase();
 
 // ---- the prompt the LLM sees (few-shot, parameter-out) ----
 function buildPrompt(obs) {
-  return `You are a Non-RT RIC rApp steering a fan of uplink beams to follow a moving crowd.
-You see ONLY per-beam UE counts over the last few ticks — never positions.
-Output the beam target for the NEXT tick, led slightly ahead of where the crowd is heading.
+  return `You are a Non-RT RIC rApp steering a grid of uplink beams toward the load in a cell.
+You see ONLY standard 3GPP telemetry: SS-RSRP per SSB beam (dBm) and the cell UE total.
+You never see UE positions. Output the beam target for the NEXT tick.
 
 Return ONLY a compact JSON object with these keys, no prose:
   fan_center  number  azimuth degrees, -49..49
@@ -27,26 +27,29 @@ Context:
   current_fan_center: ${obs.currentFanCenter}
   current_tilt: ${obs.currentTilt}
   beam_azimuths: ${JSON.stringify(obs.beamAzimuths)}
-  count_history (oldest..newest): ${JSON.stringify(obs.countHistory)}
+  ssb_rsrp_dBm (per beam, -156 means no served UE): ${JSON.stringify(obs.ssbRsrp)}
+  rsrp_power_profile (normalized): ${JSON.stringify(obs.rsrpProfile)}
+  rsrp_weighted_azimuth: ${obs.rsrpWeightedAz}
   smoothed_centroid_az: ${obs.centroidAz}
   centroid_vel_deg_per_tick: ${obs.centroidVel}
   spread_now: ${obs.spreadNow}
   spread_rising_fast: ${obs.spreadRising}
-  total_load: ${obs.load}
+  cell_ue_total: ${obs.load}
 
 Rules:
-- Normal movement: set fan_center a little AHEAD of the centroid along its velocity. action=follow.
-- If spread_rising_fast is true and centroid barely moving: radial dispersal. action=widen, keep fan_center near centroid.
-- If load splits across both edges: action=allocate.
+- Normal movement: point fan_center at the RSRP weight, a little AHEAD along its velocity. action=follow.
+- If spread_rising_fast is true and the weight is barely moving: radial dispersal. action=widen.
+- If the RSRP power is split across both edges of the grid: action=allocate.
 - Keep tilt so coverage sits on the crowd's range.`;
 }
 
 // ---- deterministic fallback (also the "no model" path) ----
 function deterministic(obs) {
   const lead = 2.2; // ticks of lead
-  let fan = obs.centroidAz + obs.centroidVel * lead;
+  const base = (obs.rsrpWeightedAz != null) ? obs.rsrpWeightedAz : obs.centroidAz;
+  let fan = base + obs.centroidVel * lead;
   let action = "follow";
-  if (obs.spreadRising && Math.abs(obs.centroidVel) < 0.6) { action = "widen"; fan = obs.centroidAz; }
+  if (obs.spreadRising && Math.abs(obs.centroidVel) < 0.6) { action = "widen"; fan = base; }
   else if (obs.splitDetected) { action = "allocate"; }
   const tilt = obs.currentTilt;
   return { fan_center: +fan.toFixed(2), tilt, action, reason:
@@ -77,7 +80,7 @@ async function callAnthropic(obs) {
 }
 
 async function callOpenAICompatible(obs) {
-  // works for NVIDIA Nemotron (NIM) / Qwen / vLLM / Ollama behind an OpenAI-compatible endpoint
+  // local Qwen 2.5 + LoRA adapter served by serve.py (or Ollama) on an OpenAI-compatible endpoint
   const base = process.env.MODEL_ENDPOINT || "http://localhost:8000/v1";
   const r = await fetch(`${base}/chat/completions`, {
     method: "POST",

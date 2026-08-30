@@ -6,7 +6,8 @@ import { Crowd } from "./crowd.js";
 import { AzimuthSmoother } from "./filter.js";
 import { decide, MODEL_INFO } from "./model.js";
 import { validateAndFormat } from "./formatter.js";
-import { countPerBeam, beamCentroid, fanAzimuths, rangeToTilt, toPolar } from "./geometry.js";
+import { countPerBeam, beamCentroid, fanAzimuths, rangeToTilt, toPolar,
+         rsrpPerBeam, rsrpCentroid, RSRP_MIN } from "./geometry.js";
 
 // forecasting tool modes. reactive = today's follower. lead/momentum = deterministic
 // forward projection on the SAME model. predictive = reserved for the L3 tuned model (WIP).
@@ -60,31 +61,42 @@ export class ControlLoop {
   // Deterministic aim selection based on the active forecasting mode.
   // Returns { aim, effectiveMode } — effectiveMode may drop back to "reactive"
   // when the confidence gate or UE floor says leading is unsafe.
+  // PURE MODES. The mode you select is the mode that runs, every tick.
+  // There is no silent fallback between modes and no blending: Lead always leads,
+  // Momentum always projects on momentum, Reactive always aims at the crowd now.
+  // The ONLY override is the UE floor, which is a safety hold, not another mode.
   _aimForMode(centroidAz, totalUe) {
-    const base = centroidAz;                 // reactive baseline (aim at the crowd now)
-    // UE floor: too few users -> centroid is noise. Hold the last good position.
+    const base = centroidAz;                 // where the load is right now
+
+    // Safety hold: below the UE floor the centroid is noise, so nothing is tracked.
+    // This is the one case that overrides the selected mode, and it is reported as
+    // "hold" so the UI is explicit that the mode did not run this tick.
     if (totalUe < UE_FLOOR) {
       return { aim: this.lastGoodFan, effectiveMode: "hold" };
     }
-    // predictive (L3 tuned model) not wired yet -> behave as lead for now (WIP)
-    const wanted = this.mode === "predictive" ? "lead" : this.mode;
 
-    if (wanted === "reactive") {
-      return { aim: base, effectiveMode: "reactive" };
+    switch (this.mode) {
+      case "reactive":
+        // aim at the crowd's current position
+        return { aim: base, effectiveMode: "reactive" };
+
+      case "lead":
+        // always project forward, whether or not motion looks consistent.
+        // If the crowd is milling about the projection is small anyway.
+        return { aim: this.smoother.project(LEAD_TICKS), effectiveMode: "lead" };
+
+      case "momentum":
+        // pure momentum: the forward projection itself, no blend with the baseline
+        return { aim: this.smoother.project(MOMENTUM_TICKS), effectiveMode: "momentum" };
+
+      case "predictive":
+        // not implemented. Do NOT quietly behave as another mode — hold and say so,
+        // so the UI cannot imply a capability that does not exist.
+        return { aim: this.fanCenter, effectiveMode: "predictive-unimplemented" };
+
+      default:
+        return { aim: base, effectiveMode: "reactive" };
     }
-    // lead / momentum both need consistent motion; otherwise fall back to reactive
-    if (!this.smoother.isMotionConsistent()) {
-      return { aim: base, effectiveMode: "reactive" };
-    }
-    if (wanted === "lead") {
-      return { aim: this.smoother.project(LEAD_TICKS), effectiveMode: "lead" };
-    }
-    if (wanted === "momentum") {
-      // momentum: blend the smoothed position with a shorter forward projection
-      const proj = this.smoother.project(MOMENTUM_TICKS);
-      return { aim: 0.5 * base + 0.5 * proj, effectiveMode: "momentum" };
-    }
-    return { aim: base, effectiveMode: "reactive" };
   }
 
   async stepAsync() {
@@ -92,18 +104,31 @@ export class ControlLoop {
     this.crowd.step();
     const ues = this.crowd.ues;
 
-    // --- gNB: measure counts per beam (KPM) ---
-    const counts = countPerBeam(ues, this.fanCenter, this.tilt);
-    this.history.push(counts);
+    // --- gNB: measure SS-RSRP per SSB beam (3GPP TS 28.552) ---
+    // This is what a real gNodeB reports. Per-beam UE counts are NOT a standard
+    // counter; `members` below is derived (best-beam assignment) and is display only.
+    const sensed = rsrpPerBeam(ues, this.fanCenter);
+    const rsrp = sensed.rsrp;               // SS-RSRP per SSB, dBm
+    const counts = sensed.members;          // derived per-beam membership (display only)
+    const load = counts.reduce((a, b) => a + b, 0);   // RRC.ConnMean equivalent, per cell
+    this.history.push(rsrp);                // history is now RSRP profiles
     if (this.history.length > 6) this.history.shift();
 
-    const { az: centAz, load, spread } = beamCentroid(counts, this.fanCenter);
+    // steering signal: the RSRP-weighted azimuth (linear power weights)
+    const { az: centAz, profile: rsrpProfile } = rsrpCentroid(rsrp, this.fanCenter);
+    // angular spread of the RSRP weight, for the legacy spread signal
+    const _azs = fanAzimuths(this.fanCenter);
+    let _sv = 0;
+    for (let b = 0; b < rsrpProfile.length; b++) _sv += rsrpProfile[b] * (_azs[b] - centAz) ** 2;
+    const spread = Math.sqrt(_sv);
 
     // spread-rising detection over last few ticks (chaos signal)
     let spreadRising = false;
-    if (this.history.length >= 3) {
-      const spreads = this.history.map(c => beamCentroid(c, this.fanCenter).spread);
-      const d = spreads[spreads.length - 1] - spreads[0];
+    this.spreadHist = this.spreadHist || [];
+    this.spreadHist.push(spread);
+    if (this.spreadHist.length > 6) this.spreadHist.shift();
+    if (this.spreadHist.length >= 3) {
+      const d = this.spreadHist[this.spreadHist.length - 1] - this.spreadHist[0];
       spreadRising = d > 8; // degrees of azimuth spread growth
     }
     const splitDetected = this._splitDetected(counts);
@@ -178,7 +203,9 @@ export class ControlLoop {
       currentFanCenter: +this.fanCenter.toFixed(2),
       currentTilt: +this.tilt.toFixed(2),
       beamAzimuths: fanAzimuths(this.fanCenter).map(a => +a.toFixed(1)),
-      countHistory: this.history,
+      ssbRsrp: rsrp,                                   // SS-RSRP per SSB (the real signal)
+      rsrpProfile: rsrpProfile.map(v => +v.toFixed(3)), // normalized power weights
+      rsrpWeightedAz: +centAz.toFixed(2),               // where the RF demand sits
       centroidAz: this.centroid.az,
       centroidVel: +vel.toFixed(3),
       spreadNow: +spread.toFixed(2),
@@ -187,12 +214,76 @@ export class ControlLoop {
     };
     const params = await decide(obs);
 
-    // Point 2 & 3: beam math derives from the centroid. The forecasting MODE decides
-    // whether we aim AT the crowd (reactive) or AHEAD of it (lead/momentum), via a
-    // deterministic tool step with a confidence gate + UE floor. Same model either way.
+    // ------------------------------------------------------------------
+    // THE MODEL PROPOSES. DETERMINISTIC CODE DISPOSES.
+    //
+    // The model's fan_center is the PROPOSAL and it is what we commit, provided it
+    // survives the fences below. It is never silently replaced by our own maths.
+    //
+    // The reference aim (forecast mode applied to the RSRP centroid) is kept, but only
+    // as (a) a sanity envelope and (b) the fallback when the model gives us nothing
+    // usable or the UE floor says do not track. Every intervention is recorded in
+    // this.decision so the UI can show exactly what happened this tick.
+    // ------------------------------------------------------------------
     const { aim, effectiveMode } = this._aimForMode(this.centroid.az, load);
-    params.fan_center = +aim.toFixed(2);
-    params.tilt = +beamRangeTilt.toFixed(1);
+
+    const modelFan  = Number(params.fan_center);
+    const modelTilt = Number(params.tilt);
+    const dec = { source: "model", notes: [], modelFan, modelTilt, referenceAim: +aim.toFixed(2) };
+
+    let chosenFan, chosenTilt;
+
+    if (effectiveMode === "hold") {
+      // UE floor: too few users for the centroid to mean anything. Hold, ignore the model.
+      chosenFan = aim;
+      dec.source = "hold";
+      dec.notes.push("UE floor: too few users to track, holding last good position");
+    } else if (!Number.isFinite(modelFan)) {
+      // Model returned nothing usable. HOLD — do not let the tool quietly steer in its
+      // place. A frozen beam is an honest, visible failure. A beam that keeps tracking
+      // smoothly would hide the fact that the model contributed nothing this tick.
+      chosenFan = this.fanCenter;
+      dec.source = "no-decision";
+      dec.notes.push("model returned no usable fan_center, holding position");
+    } else {
+      // THE MODEL STEERS.
+      chosenFan = modelFan;
+
+      // Fence 1: sanity envelope. The model may lead or lag the reference aim, but it
+      // may not point somewhere unrelated to where the load actually is.
+      const MAX_DEV = 25;                                  // degrees from the reference aim
+      if (Math.abs(chosenFan - aim) > MAX_DEV) {
+        chosenFan = aim + Math.sign(chosenFan - aim) * MAX_DEV;
+        dec.source = "model-clamped";
+        dec.notes.push(`proposal ${modelFan.toFixed(1)}° exceeded ±${MAX_DEV}° of the load bearing, pulled to ${chosenFan.toFixed(1)}°`);
+      }
+      // Fence 2: slew limit. No violent jumps between ticks.
+      const MAX_STEP = 15;                                 // degrees per tick
+      const step = chosenFan - this.fanCenter;
+      if (Math.abs(step) > MAX_STEP) {
+        chosenFan = this.fanCenter + Math.sign(step) * MAX_STEP;
+        dec.source = dec.source === "model" ? "model-clamped" : dec.source;
+        dec.notes.push(`slew limited to ${MAX_STEP}° per tick`);
+      }
+    }
+
+    // Tilt: accept the model's value when it is sane, else use the geometric tilt for
+    // the crowd's range. Same principle - propose, then fence.
+    if (Number.isFinite(modelTilt) && modelTilt >= 3 && modelTilt <= 45) {
+      chosenTilt = modelTilt;
+    } else if (dec.source === "no-decision" || dec.source === "hold") {
+      chosenTilt = this.tilt;                      // holding: leave tilt where it is
+    } else {
+      chosenTilt = this.tilt;                      // hold tilt rather than substitute maths
+      if (dec.source === "model") { dec.source = "model-partial"; }
+      dec.notes.push("model tilt unusable, holding previous tilt");
+    }
+
+    params.fan_center = +chosenFan.toFixed(2);
+    params.tilt = +chosenTilt.toFixed(1);
+    dec.committedFan = params.fan_center;
+    dec.committedTilt = params.tilt;
+    this.decision = dec;
 
     // --- SMO: validate + format into A1/O1 (deterministic tool) ---
     const ts = Date.now();
@@ -215,22 +306,35 @@ export class ControlLoop {
     // --- build the signaling log (what each interface carries) ---
     const log = {
       tick: this.tick,
-      gNB_to_SMO_KPM: {
-        schema: "demo.e2sm-kpm.v1", note: "ASN.1 on the wire; decoded here",
-        beam_counts: counts, total_ue: load
+      gNB_to_SMO_O1: {
+        interface: "O1 · PM (VES)", spec: "3GPP TS 28.552",
+        "SS.RSRP_perSSB_dBm": rsrp,
+        "RRC.ConnMean": load,
+        beam_azimuths: sensed.azimuths,
+        note: "per-beam membership is derived, not a standard counter",
+        beam_members: counts
       },
       SMO_to_rApp_R1: {
-        schema: "demo.r1.data.v1",
-        count_history: this.history,
-        centroid_method: "count_weighted",
+        interface: "R1 · Data Management & Exposure", spec: "O-RAN.WG2.R1AP",
+        ssb_rsrp: rsrp,
+        cell_ue_total: load,
+        current: { fan_center_deg: +this.fanCenter.toFixed(2), tilt_deg: +this.tilt.toFixed(2) },
+        centroid_method: "rsrp_weighted",
+        rsrp_weighted_az: obs.rsrpWeightedAz,
         centroid_az: obs.centroidAz, centroid_vel: obs.centroidVel,
         spread: obs.spreadNow, spread_rising: spreadRising, split: splitDetected
       },
       rApp_proposal: {
-        params_only: params,       // the model's raw output — numbers only
+        model_proposed: { fan_center: this.decision.modelFan, tilt: this.decision.modelTilt },
+        committed: { fan_center: this.decision.committedFan, tilt: this.decision.committedTilt },
+        source: this.decision.source,
+        guardrails: this.decision.notes,
+        reference_aim: this.decision.referenceAim,
+        params_only: params,
         model: MODEL_INFO
       },
-      SMO_to_gNB_A1_O1: {
+      SMO_to_gNB_O1: {
+        interface: "O1 · NETCONF/YANG", spec: "3GPP TS 28.541 · CommonBeamformingFunction",
         a1_policy: formatted.a1Policy,
         o1_config: formatted.o1Config,
         validation: formatted.validation
@@ -248,17 +352,18 @@ export class ControlLoop {
     if (committedFan > prevFanCenter + 1) dir = "right";
     else if (committedFan < prevFanCenter - 1) dir = "left";
     else dir = "hold";
+    // Reason text: when the model steered, show the MODEL'S OWN words. Template text is
+    // used only when the model did not decide (hold / fallback), and is labelled as such.
     let reasonText;
-    if (effectiveMode === "hold") {
-      reasonText = "holding last position, too few UEs to track reliably";
-    } else if (dir === "hold") {
-      reasonText = "holding on the count-weighted centroid";
-    } else if (effectiveMode === "lead") {
-      reasonText = `leading ${dir} ahead of the crowd on steady motion`;
-    } else if (effectiveMode === "momentum") {
-      reasonText = `steering ${dir} with momentum toward the centroid`;
+    const modelReason = String(params.reason || "").trim();
+    if (this.decision.source === "hold") {
+      reasonText = "[tool] holding last position, too few UEs to track reliably";
+    } else if (this.decision.source === "no-decision") {
+      reasonText = "[tool] no usable model output, holding position";
+    } else if (modelReason) {
+      reasonText = modelReason;                       // the model's own explanation
     } else {
-      reasonText = `steering the fan ${dir} toward the count-weighted centroid`;
+      reasonText = `[tool] model gave no reason, moved ${dir}`;
     }
 
     // rolling proposal history (oldest first, newest at end, keep last 100) with timestamps
@@ -268,11 +373,16 @@ export class ControlLoop {
     this.proposalHistory.push({
       t: hhmmss,
       tick: this.tick,
-      fan_center: params.fan_center,
+      fan_center: params.fan_center,          // what was COMMITTED
       tilt: params.tilt,
       action: params.action,
       mode: effectiveMode,
-      reason: reasonText
+      reason: reasonText,
+      // provenance: what the model actually asked for, and what the fences did
+      source: this.decision.source,            // model | model-clamped | model-partial | fallback | hold
+      proposedFan: this.decision.modelFan != null && Number.isFinite(this.decision.modelFan)
+        ? +this.decision.modelFan.toFixed(2) : null,
+      guard: this.decision.notes.length ? this.decision.notes.join("; ") : null
     });
     if (this.proposalHistory.length > 100) this.proposalHistory.shift();
     return log;
@@ -295,6 +405,7 @@ export class ControlLoop {
       anomaly: this.anomaly,
       anomalyArmed: this.anomalyArmed,
       action: this.lastProposal?.action || "follow",
+      decision: this.decision || null,
       proposals: this.proposalHistory || [],
       escalation: this.escalation,
       log: this.lastLog,
