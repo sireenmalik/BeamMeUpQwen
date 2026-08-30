@@ -21,7 +21,7 @@ Return ONLY a compact JSON object with these keys, no prose:
   fan_center  number  azimuth degrees, -49..49
   tilt        number  degrees, 3..45  (smaller tilt = farther coverage)
   action      string  one of: follow, allocate, widen, hold
-  reason      string  <=12 words
+  reason      string  <=8 words, plain, no repetition
 
 Context:
   current_fan_center: ${obs.currentFanCenter}
@@ -91,7 +91,7 @@ async function callOpenAICompatible(obs) {
     body: JSON.stringify({
       model: process.env.MODEL_NAME || "qwen2.5:1.5b",
       temperature: 0,
-      max_tokens: 200,
+      max_tokens: 120,
       messages: [{ role: "user", content: buildPrompt(obs) }],
       chat_template_kwargs: { enable_thinking: false }
     })
@@ -106,21 +106,61 @@ async function callOpenAICompatible(obs) {
   return parseParams(text, obs);
 }
 
+// Salvage the numbers even when the generation is truncated.
+// Small models can loop on a text field and blow the token budget, leaving the JSON
+// unterminated. The numeric fields arrive FIRST and are complete; throwing the whole
+// response away because a trailing string never closed would discard a good decision.
+function salvage(text) {
+  const num = (k) => {
+    const m = text.match(new RegExp('"' + k + '"\\s*:\\s*(-?\\d+(?:\\.\\d+)?)'));
+    return m ? Number(m[1]) : NaN;
+  };
+  const str = (k) => {
+    const m = text.match(new RegExp('"' + k + '"\\s*:\\s*"([^"]*)'));
+    return m ? m[1] : "";
+  };
+  return {
+    fan_center: num("fan_center"),
+    tilt: num("tilt"),
+    action: str("action") || "follow",
+    reason: str("reason")
+  };
+}
+
+// collapse a repeated phrase, e.g. "moving moving moving ..." -> "moving"
+function dedupe(s) {
+  return s.replace(/\b([\w-]+)(\s+\1\b)+/gi, "$1").trim().slice(0, 80);
+}
+
 function parseParams(text, obs) {
+  const raw = text || "";
+  // 1. clean parse
   try {
-    const m = text.match(/\{[\s\S]*\}/);
-    if (!m) { console.error("PARSE-FAIL: no JSON found | raw:", (text || "").slice(0, 150)); return deterministic(obs); }
-    const p = JSON.parse(m[0]);
-    return {
-      fan_center: Number(p.fan_center),
-      tilt: Number(p.tilt),
-      action: p.action,
-      reason: String(p.reason || "").slice(0, 80)
-    };
-  } catch (e) {
-    console.error("PARSE-FAIL:", e.message, "| raw:", (text || "").slice(0, 150));
-    return deterministic(obs);
+    const m = raw.match(/\{[\s\S]*\}/);
+    if (m) {
+      const p = JSON.parse(m[0]);
+      if (Number.isFinite(Number(p.fan_center))) {
+        return {
+          fan_center: Number(p.fan_center),
+          tilt: Number(p.tilt),
+          action: p.action || "follow",
+          reason: dedupe(String(p.reason || ""))
+        };
+      }
+    }
+  } catch (e) { /* fall through to salvage */ }
+
+  // 2. truncated generation -> pull the numbers out anyway
+  const s = salvage(raw);
+  if (Number.isFinite(s.fan_center)) {
+    console.warn("PARSE-SALVAGED: truncated generation, numbers recovered ->",
+                 "fan_center=" + s.fan_center, "tilt=" + s.tilt);
+    return { fan_center: s.fan_center, tilt: s.tilt, action: s.action, reason: dedupe(s.reason) };
   }
+
+  // 3. genuinely unusable -> let the loop hold position
+  console.error("PARSE-FAIL: no usable numbers | raw:", raw.slice(0, 150));
+  return { fan_center: NaN, tilt: NaN, action: "hold", reason: "" };
 }
 
 export async function decide(obs) {

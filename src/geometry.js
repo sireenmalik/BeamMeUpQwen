@@ -97,11 +97,18 @@ export function pathLoss38901(d) {
   return 32.4 + 21 * Math.log10(dd) + 20 * Math.log10(FC_GHZ);
 }
 
-// cos^2 beam pattern gain (dB) relative to boresight, with a side-lobe floor.
+// 3GPP-style parabolic element pattern (TR 38.901 §7.3):
+//   A(theta) = -min( 12 * (theta / theta_3dB)^2 , A_max )
+// A cos^2 pattern is far too broad for 15 degree beam spacing — adjacent beams differ by
+// barely a dB, which flattens the profile and destroys the steering gradient. A realistic
+// half-power beamwidth gives beams that actually discriminate between directions.
+export const HPBW_DEG = 20;      // half-power beamwidth per beam
+export const FRONT_BACK_DB = 30; // maximum attenuation (side-lobe floor)
+
 function beamGainDb(azOffsetDeg) {
-  const off = Math.min(90, Math.abs(azOffsetDeg));
-  const lin = Math.pow(Math.cos(off * Math.PI / 180), 2);
-  return G_MAX_DBI + 10 * Math.log10(Math.max(1e-3, lin));   // ~ -15 dB floor
+  const off = Math.abs(azOffsetDeg);
+  const atten = Math.min(12 * Math.pow(off / HPBW_DEG, 2), FRONT_BACK_DB);
+  return G_MAX_DBI - atten;
 }
 
 function gaussianNoise(sigma) {
@@ -126,27 +133,32 @@ function quantizeRsrp(dbm) {
 export function rsrpPerBeam(ues, fanCenter) {
   const azs = fanAzimuths(fanCenter);
   const N = azs.length;
-  const linSum  = new Array(N).fill(0);
-  const members = new Array(N).fill(0);
+  const linSum  = new Array(N).fill(0);   // total received power per beam
+  const members = new Array(N).fill(0);   // best-beam assignment (display only)
 
   for (const u of ues) {
     const { az, range } = toPolar(u.x, u.y);
-    const d3d = Math.hypot(range, TOWER_H);          // 3D distance incl. tower height
+    const d3d = Math.hypot(range, TOWER_H);
     const pl  = pathLoss38901(d3d);
-    const sf  = gaussianNoise(SF_SIGMA_DB);          // one shadow draw per UE
+    const sf  = gaussianNoise(SF_SIGMA_DB);      // one shadow draw per UE
 
+    // EVERY beam hears EVERY UE, at a strength set by how far off boresight it is.
+    // Real grid-of-beams patterns overlap; a beam does not go silent because a user is
+    // better served elsewhere. Reporting only the best-beam assignment produced a nearly
+    // flat profile (~2 dB) with no gradient to steer on. Summing what each beam actually
+    // receives gives the monotonic roll-off a real RSRP profile has.
     let bestB = 0, bestR = -Infinity;
     for (let b = 0; b < N; b++) {
       const rsrp = P_TX_DBM - pl + beamGainDb(az - azs[b]) + sf;
+      linSum[b] += Math.pow(10, rsrp / 10);
       if (rsrp > bestR) { bestR = rsrp; bestB = b; }
     }
     members[bestB]++;
-    linSum[bestB] += Math.pow(10, bestR / 10);        // aggregate in linear power
   }
 
   const rsrp = new Array(N).fill(RSRP_MIN);
   for (let b = 0; b < N; b++) {
-    if (members[b] > 0) rsrp[b] = quantizeRsrp(10 * Math.log10(linSum[b] / members[b]));
+    if (linSum[b] > 0) rsrp[b] = quantizeRsrp(10 * Math.log10(linSum[b]));
   }
   return { rsrp, members, azimuths: azs.map(a => +a.toFixed(1)) };
 }
@@ -156,9 +168,22 @@ export function rsrpPerBeam(ues, fanCenter) {
 // and cannot be averaged directly). Beams with no served UE are excluded.
 export function rsrpCentroid(rsrp, fanCenter) {
   const azs = fanAzimuths(fanCenter);
-  const lin = rsrp.map(r => (r <= RSRP_MIN ? 0 : Math.pow(10, r / 10)));
+  const served = rsrp.filter(r => r > RSRP_MIN);
+  if (!served.length) return { az: fanCenter, profile: rsrp.map(() => 0) };
+
+  // Weight on CONTRAST, not absolute power.
+  //
+  // Overlapping beams all hear the crowd, so absolute powers sit within a few dB of each
+  // other. Converting those straight back to linear gives near-equal weights and the
+  // centroid collapses toward boresight. What carries the direction is how far each beam
+  // sits ABOVE the weakest beam. Subtracting the floor and then going to linear restores
+  // the contrast, and the exponent sharpens it so the peak beam dominates the average.
+  const floor = Math.min(...served);
+  const SHARPNESS = 1.0;                       // plain dB contrast; the pattern now supplies it
+  const lin = rsrp.map(r => r <= RSRP_MIN ? 0 : Math.pow(10, (r - floor) * SHARPNESS / 10));
   const tot = lin.reduce((a, b) => a + b, 0);
-  if (tot <= 0) return { az: fanCenter, profile: lin.map(() => 0) };
+  if (tot <= 0) return { az: fanCenter, profile: rsrp.map(() => 0) };
+
   const az = lin.reduce((s, w, i) => s + w * azs[i], 0) / tot;
   return { az, profile: lin.map(w => +(w / tot).toFixed(4)) };
 }
