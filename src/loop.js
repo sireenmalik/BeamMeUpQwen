@@ -14,6 +14,10 @@ import { countPerBeam, beamCentroid, fanAzimuths, rangeToTilt, toPolar,
 export const FORECAST_MODES = ["reactive", "lead", "momentum", "predictive"];
 const LEAD_TICKS = 1.5;        // how far ahead Lead aims (tunable)
 const MOMENTUM_TICKS = 1.0;    // projection horizon for Momentum
+// Set GUARD_OFF=1 in the environment to run the model UNFENCED.
+// Diagnostic only: answers "is the beam wrong because the model is wrong, or
+// because the guardrails are pulling it?" Never run a live estate like this.
+const GUARD_OFF = process.env.GUARD_OFF === "1";
 const UE_FLOOR = 3;            // below this many total UEs, hold (don't chase noise)
 
 export class ControlLoop {
@@ -251,14 +255,14 @@ export class ControlLoop {
 
       // Fence 1: sanity envelope. The model may lead or lag the reference aim, but it
       // may not point somewhere unrelated to where the load actually is.
-      const MAX_DEV = 25;                                  // degrees from the reference aim
+      const MAX_DEV = GUARD_OFF ? 999 : 25;                // degrees from the reference aim
       if (Math.abs(chosenFan - aim) > MAX_DEV) {
         chosenFan = aim + Math.sign(chosenFan - aim) * MAX_DEV;
         dec.source = "model-clamped";
         dec.notes.push(`proposal ${modelFan.toFixed(1)}° exceeded ±${MAX_DEV}° of the load bearing, pulled to ${chosenFan.toFixed(1)}°`);
       }
       // Fence 2: slew limit. No violent jumps between ticks.
-      const MAX_STEP = 15;                                 // degrees per tick
+      const MAX_STEP = GUARD_OFF ? 999 : 15;               // degrees per tick
       const step = chosenFan - this.fanCenter;
       if (Math.abs(step) > MAX_STEP) {
         chosenFan = this.fanCenter + Math.sign(step) * MAX_STEP;
