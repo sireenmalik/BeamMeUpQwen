@@ -13,16 +13,22 @@ const PROVIDER = (process.env.MODEL_PROVIDER || "none").toLowerCase();
 
 // ---- the prompt the LLM sees (few-shot, parameter-out) ----
 function buildPrompt(obs) {
-  // IMPORTANT: this prompt must stay in lockstep with to_messages() in
-  // train_beam_lora_cpu_v3.py. The adapter is fine-tuned on this exact shape.
-  // A 0.5B model does not benefit from a wall of fields; it benefits from the few
-  // that carry the decision. Changing this without retraining will degrade steering.
+  // MUST match to_messages() in gen_v7.py exactly.
+  //
+  // current_fan_center is deliberately ABSENT. The weighted centroid is fully
+  // determined by the RSRP profile and the beam azimuths - the current beam position
+  // does not appear in the equation. Supplying it gave the model a scalar to copy, and
+  // it did: the same profile returned -10 when told the beam was at -10, and 0 when
+  // told it was at 0, while the crowd sat at +16. The azimuths carry the frame.
+  //
+  // tilt is not requested either. It is atan(tower_height / range), computed in the
+  // harness. There is exactly one right answer for a given range, so it is arithmetic.
   return `You are a Non-RT RIC rApp steering a grid of uplink beams toward the load in a cell. \
-You are given SS-RSRP per SSB beam in dBm and the current beam config. \
-Return ONLY one JSON object with keys: fan_center (-49..49), tilt (3..45), \
-action (follow|widen|allocate), reason (short). No prose, no thinking, JSON only.
+You are given SS-RSRP per SSB beam in dBm and the azimuth each beam points at. \
+Return ONLY one JSON object with keys: fan_center (-49..49), action \
+(follow|widen|allocate), reason (short). No prose, no thinking, JSON only.
 
-ssb_rsrp_dBm=${JSON.stringify(obs.ssbRsrp)} (beam azimuths ${JSON.stringify(obs.beamAzimuths)} deg); current fan_center=${obs.currentFanCenter}, tilt=${obs.currentTilt}`;
+ssb_rsrp_dBm=${JSON.stringify(obs.ssbRsrp)} (beam azimuths ${JSON.stringify(obs.beamAzimuths)} deg)`;
 }
 
 // ---- deterministic fallback (also the "no model" path) ----
