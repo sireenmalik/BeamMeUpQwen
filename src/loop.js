@@ -282,13 +282,14 @@ export class ControlLoop {
       chosenFan = modelFan;
     }
 
-    if (Number.isFinite(modelTilt)) {
-      chosenTilt = modelTilt;
-    } else {
-      chosenTilt = this.tilt;
-      if (dec.source === "model") dec.source = "model-partial";
-      dec.notes.push("model tilt unusable, holding previous tilt");
-    }
+    // TILT IS ARITHMETIC, NOT JUDGEMENT.
+    //
+    // tilt = atan(tower_height / range). There is nothing to decide - given the crowd's
+    // range there is exactly one correct down-angle. The model was echoing whatever tilt
+    // it was handed (24.4 deg every tick), so the beam stayed at ~60 m while the crowd
+    // walked out to 100 m: correct bearing, short range. Compute it in the harness and
+    // let the model own the bearing, which is the part with a real decision in it.
+    chosenTilt = beamRangeTilt;
 
     params.fan_center = +chosenFan.toFixed(2);
     params.tilt = +chosenTilt.toFixed(1);
