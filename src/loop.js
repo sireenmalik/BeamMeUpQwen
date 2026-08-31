@@ -24,8 +24,9 @@ export class ControlLoop {
   constructor() {
     this.crowd = new Crowd();
     this.smoother = new AzimuthSmoother();
-    this.fanCenter = -10;
+    this.fanCenter = -10;   // provisional; locked onto the crowd on the first tick
     this.tilt = 20;
+    this.initialised = false;   // false until the beam has been placed on the crowd
     this.history = [];       // recent count vectors
     this.tick = 0;
     this.lastLog = null;
@@ -112,7 +113,21 @@ export class ControlLoop {
     // This is what a real gNodeB reports. Per-beam UE counts are NOT a standard
     // counter; `members` below is derived (best-beam assignment) and is display only.
     const sensed = rsrpPerBeam(ues, this.fanCenter);
-    const rsrp = sensed.rsrp;               // SS-RSRP per SSB, dBm
+
+    // Average the RSRP over the last 2 reports before using it.
+    //
+    // Shadow fading makes a single report wobble by about +/-1.2 deg worth of apparent
+    // bearing, so a STATIONARY crowd still made the beam twitch ~0.8 deg every tick.
+    // Averaging two consecutive reports in LINEAR power halves that (0.82 -> 0.44) while
+    // leaving a walking crowd tracked identically (16.8 deg travelled either way).
+    // No detection is involved: random error cancels across reports, real movement does not.
+    this.rsrpHist = this.rsrpHist || [];
+    this.rsrpHist.push(sensed.rsrp);
+    if (this.rsrpHist.length > 2) this.rsrpHist.shift();
+    const rsrp = sensed.rsrp.map((_, b) => {
+      const lin = this.rsrpHist.reduce((a, h) => a + Math.pow(10, h[b] / 10), 0) / this.rsrpHist.length;
+      return Math.round(10 * Math.log10(lin));
+    });
     const counts = sensed.members;          // derived per-beam membership (display only)
     const load = counts.reduce((a, b) => a + b, 0);   // RRC.ConnMean equivalent, per cell
     this.history.push(rsrp);                // history is now RSRP profiles
@@ -198,6 +213,18 @@ export class ControlLoop {
       spreadR: +spreadR.toFixed(1)
     };
     // Trail: remember where the centroid has been (last 24 points), for breadcrumbs
+    // FIRST TICK: place the beam on the crowd.
+    // The demo always starts locked on — the beam is not parked at some arbitrary angle
+    // waiting to acquire. That means the loop NEVER has to make a large move: from here
+    // on the crowd walks at ~1-3 deg per tick and the beam follows at the same pace.
+    // Training and guardrails are both sized to that envelope.
+    if (!this.initialised) {
+      this.fanCenter = this.centroid.az;
+      this.tilt = beamRangeTilt;
+      this.lastGoodFan = this.fanCenter;
+      this.initialised = true;
+    }
+
     this.trail = this.trail || [];
     this.trail.push({ az: this.centroid.az, range: this.centroid.range });
     if (this.trail.length > 24) this.trail.shift();
@@ -235,51 +262,31 @@ export class ControlLoop {
     const modelTilt = Number(params.tilt);
     const dec = { source: "model", notes: [], modelFan, modelTilt, referenceAim: +aim.toFixed(2) };
 
+    // ------------------------------------------------------------------
+    // NO GUARDRAILS. The model's number is committed exactly as given.
+    //
+    // Deliberate: mixing a model under test with clamps that rewrite its output makes
+    // it impossible to tell which one produced the behaviour on screen. Run the model
+    // bare, see what it really does, THEN decide what fences it actually needs.
+    //
+    // The only thing still honoured is: if the model returns nothing usable, hold
+    // position rather than let the tool steer in its place.
+    // ------------------------------------------------------------------
     let chosenFan, chosenTilt;
 
-    if (effectiveMode === "hold") {
-      // UE floor: too few users for the centroid to mean anything. Hold, ignore the model.
-      chosenFan = aim;
-      dec.source = "hold";
-      dec.notes.push("UE floor: too few users to track, holding last good position");
-    } else if (!Number.isFinite(modelFan)) {
-      // Model returned nothing usable. HOLD — do not let the tool quietly steer in its
-      // place. A frozen beam is an honest, visible failure. A beam that keeps tracking
-      // smoothly would hide the fact that the model contributed nothing this tick.
+    if (!Number.isFinite(modelFan)) {
       chosenFan = this.fanCenter;
       dec.source = "no-decision";
       dec.notes.push("model returned no usable fan_center, holding position");
     } else {
-      // THE MODEL STEERS.
       chosenFan = modelFan;
-
-      // Fence 1: sanity envelope. The model may lead or lag the reference aim, but it
-      // may not point somewhere unrelated to where the load actually is.
-      const MAX_DEV = GUARD_OFF ? 999 : 25;                // degrees from the reference aim
-      if (Math.abs(chosenFan - aim) > MAX_DEV) {
-        chosenFan = aim + Math.sign(chosenFan - aim) * MAX_DEV;
-        dec.source = "model-clamped";
-        dec.notes.push(`proposal ${modelFan.toFixed(1)}° exceeded ±${MAX_DEV}° of the load bearing, pulled to ${chosenFan.toFixed(1)}°`);
-      }
-      // Fence 2: slew limit. No violent jumps between ticks.
-      const MAX_STEP = GUARD_OFF ? 999 : 15;               // degrees per tick
-      const step = chosenFan - this.fanCenter;
-      if (Math.abs(step) > MAX_STEP) {
-        chosenFan = this.fanCenter + Math.sign(step) * MAX_STEP;
-        dec.source = dec.source === "model" ? "model-clamped" : dec.source;
-        dec.notes.push(`slew limited to ${MAX_STEP}° per tick`);
-      }
     }
 
-    // Tilt: accept the model's value when it is sane, else use the geometric tilt for
-    // the crowd's range. Same principle - propose, then fence.
-    if (Number.isFinite(modelTilt) && modelTilt >= 3 && modelTilt <= 45) {
+    if (Number.isFinite(modelTilt)) {
       chosenTilt = modelTilt;
-    } else if (dec.source === "no-decision" || dec.source === "hold") {
-      chosenTilt = this.tilt;                      // holding: leave tilt where it is
     } else {
-      chosenTilt = this.tilt;                      // hold tilt rather than substitute maths
-      if (dec.source === "model") { dec.source = "model-partial"; }
+      chosenTilt = this.tilt;
+      if (dec.source === "model") dec.source = "model-partial";
       dec.notes.push("model tilt unusable, holding previous tilt");
     }
 
@@ -383,7 +390,7 @@ export class ControlLoop {
       mode: effectiveMode,
       reason: reasonText,
       // provenance: what the model actually asked for, and what the fences did
-      source: this.decision.source,            // model | model-clamped | model-partial | fallback | hold
+      source: this.decision.source,            // model | model-partial | no-decision
       proposedFan: this.decision.modelFan != null && Number.isFinite(this.decision.modelFan)
         ? +this.decision.modelFan.toFixed(2) : null,
       guard: this.decision.notes.length ? this.decision.notes.join("; ") : null

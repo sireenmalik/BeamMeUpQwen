@@ -140,7 +140,26 @@ export function rsrpPerBeam(ues, fanCenter) {
     const { az, range } = toPolar(u.x, u.y);
     const d3d = Math.hypot(range, TOWER_H);
     const pl  = pathLoss38901(d3d);
-    const sf  = gaussianNoise(SF_SIGMA_DB);      // one shadow draw per UE
+    // Shadow fading is caused by buildings and terrain blocking the path. It is a
+    // property of WHERE the UE is standing, not a fresh dice roll every 2 seconds.
+    // A stationary phone behind the same building has the same obstruction tick after
+    // tick. Redrawing it independently each tick modelled white noise instead, which
+    // made a completely stationary crowd appear to swing 6 deg per tick.
+    //
+    // The fade is now attached to the UE and evolves slowly as it moves (decorrelation
+    // over ~10 m, which is the usual figure for urban shadow fading).
+    if (u._sf === undefined) {
+      u._sf = gaussianNoise(SF_SIGMA_DB);
+      u._sfX = u.x; u._sfY = u.y;
+    } else {
+      const moved = Math.hypot(u.x - u._sfX, u.y - u._sfY);
+      if (moved > 0) {
+        const rho = Math.exp(-moved / 10);                       // 10 m decorrelation
+        u._sf = rho * u._sf + Math.sqrt(1 - rho * rho) * gaussianNoise(SF_SIGMA_DB);
+        u._sfX = u.x; u._sfY = u.y;
+      }
+    }
+    const sf = u._sf;
 
     // EVERY beam hears EVERY UE, at a strength set by how far off boresight it is.
     // Real grid-of-beams patterns overlap; a beam does not go silent because a user is

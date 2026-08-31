@@ -13,41 +13,25 @@ const PROVIDER = (process.env.MODEL_PROVIDER || "none").toLowerCase();
 
 // ---- the prompt the LLM sees (few-shot, parameter-out) ----
 function buildPrompt(obs) {
-  return `You are a Non-RT RIC rApp steering a grid of uplink beams toward the load in a cell.
-You see ONLY standard 3GPP telemetry: SS-RSRP per SSB beam (dBm) and the cell UE total.
-You never see UE positions. Output the beam target for the NEXT tick.
+  // IMPORTANT: this prompt must stay in lockstep with to_messages() in
+  // train_beam_lora_cpu_v3.py. The adapter is fine-tuned on this exact shape.
+  // A 0.5B model does not benefit from a wall of fields; it benefits from the few
+  // that carry the decision. Changing this without retraining will degrade steering.
+  return `You are a Non-RT RIC rApp steering a grid of uplink beams toward the load in a cell. \
+You are given SS-RSRP per SSB beam in dBm and the current beam config. \
+Return ONLY one JSON object with keys: fan_center (-49..49), tilt (3..45), \
+action (follow|widen|allocate), reason (short). No prose, no thinking, JSON only.
 
-Return ONLY a compact JSON object with these keys, no prose:
-  fan_center  number  azimuth degrees, -49..49
-  tilt        number  degrees, 3..45  (smaller tilt = farther coverage)
-  action      string  one of: follow, allocate, widen, hold
-  reason      string  <=8 words, plain, no repetition
-
-Context:
-  current_fan_center: ${obs.currentFanCenter}
-  current_tilt: ${obs.currentTilt}
-  beam_azimuths: ${JSON.stringify(obs.beamAzimuths)}
-  ssb_rsrp_dBm (per beam, -156 means no served UE): ${JSON.stringify(obs.ssbRsrp)}
-  rsrp_power_profile (normalized): ${JSON.stringify(obs.rsrpProfile)}
-  rsrp_weighted_azimuth: ${obs.rsrpWeightedAz}
-  smoothed_centroid_az: ${obs.centroidAz}
-  centroid_vel_deg_per_tick: ${obs.centroidVel}
-  spread_now: ${obs.spreadNow}
-  spread_rising_fast: ${obs.spreadRising}
-  cell_ue_total: ${obs.load}
-
-Rules:
-- Normal movement: point fan_center at the RSRP weight, a little AHEAD along its velocity. action=follow.
-- If spread_rising_fast is true and the weight is barely moving: radial dispersal. action=widen.
-- If the RSRP power is split across both edges of the grid: action=allocate.
-- Keep tilt so coverage sits on the crowd's range.`;
+ssb_rsrp_dBm=${JSON.stringify(obs.ssbRsrp)} (beam azimuths ${JSON.stringify(obs.beamAzimuths)} deg); current fan_center=${obs.currentFanCenter}, tilt=${obs.currentTilt}`;
 }
 
 // ---- deterministic fallback (also the "no model" path) ----
 function deterministic(obs) {
-  const lead = 2.2; // ticks of lead
+  // REACTIVE: aim AT the crowd's centroid now. No lead, no projection.
+  // The forecasting mode decides whether to look ahead; the deterministic path must not
+  // add its own hidden lead on top, or "reactive" quietly becomes "lead".
   const base = (obs.rsrpWeightedAz != null) ? obs.rsrpWeightedAz : obs.centroidAz;
-  let fan = base + obs.centroidVel * lead;
+  let fan = base;
   let action = "follow";
   if (obs.spreadRising && Math.abs(obs.centroidVel) < 0.6) { action = "widen"; fan = base; }
   else if (obs.splitDetected) { action = "allocate"; }
@@ -127,9 +111,23 @@ function salvage(text) {
   };
 }
 
-// collapse a repeated phrase, e.g. "moving moving moving ..." -> "moving"
-function dedupe(s) {
-  return s.replace(/\b([\w-]+)(\s+\1\b)+/gi, "$1").trim().slice(0, 80);
+// Collapse repetition in the model's reason text. Small models under-trained on the
+// current input format tend to loop on a word, e.g.
+//   "steering right toward the counterclockwise-moving counterclockwise-moving counterc"
+// Immediate repeats are collapsed, then any word appearing more than twice is dropped
+// after its second occurrence, and a dangling partial word at the end is trimmed.
+function dedupe(str) {
+  let s = String(str || "").replace(/\b([\w-]+)(\s+\1\b)+/gi, "$1");
+  const seen = {};
+  s = s.split(/\s+/).filter(w => {
+    const k = w.toLowerCase();
+    seen[k] = (seen[k] || 0) + 1;
+    return seen[k] <= 2;
+  }).join(" ");
+  // drop a trailing truncated fragment ("counterc")
+  const parts = s.split(" ");
+  if (parts.length > 2 && parts[parts.length - 1].length < 4) parts.pop();
+  return parts.join(" ").trim().slice(0, 70);
 }
 
 function parseParams(text, obs) {
