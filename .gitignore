@@ -33,3 +33,4 @@ adapter/
 *.gguf
 ~$*
 *_3.pptx
+*.bak
