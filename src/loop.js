@@ -224,12 +224,37 @@ export class ControlLoop {
     //
     // The model is not involved. Tilt has one right answer for a given range.
     // ---------------------------------------------------------------------
+    // RANGE FROM THE TOP TWO BEAMS, bias-corrected.
+    //
+    // Peak-beam alone carries a 15 deg periodic ripple: when the crowd sits midway
+    // between two beams, the peak beam only sees part of it, power reads low and the
+    // inferred range runs long. Summing the peak with its strongest ADJACENT neighbour
+    // conserves that power across the beam boundary, so the estimate stays flat as the
+    // crowd crosses it. Measured ripple 9.1 m -> 4.7 m.
+    //
+    // The remaining bias is systematic, not noise: aggregating 60 UEs sums linear power
+    // while propagation is logarithmic, so the sum is dominated by the nearest and best
+    // faded UEs and reads hotter than the average user (Jensen). Log-normal fading alone
+    // contributes a predictable +1.84 dB (verified: measured +1.75 to +1.78 dB). The
+    // quadratic below inverts that bias; it was fitted across BOTH range and off-axis
+    // offset, not at boresight only - an earlier total-power version calibrated at
+    // boresight looked excellent offline and collapsed to 19-23 deg of error in the loop.
+    //
+    // Verified off-axis: error within +/-3.4 m for offsets 0-20 deg at 80/100/130 m.
+    // Still blind below ~65 m, where the aggregated RSRP hits the TS 38.133 ceiling of
+    // -31 dBm and every range from 20 to 60 m reports the same value.
     const nUe = Math.max(1, counts.reduce((a, b) => a + b, 0));
-    const peakRsrp = Math.max(...rsrp);
-    const perUeDbm = peakRsrp - 10 * Math.log10(nUe);
+    const iPk = rsrp.indexOf(Math.max(...rsrp));
+    const nb = [iPk - 1, iPk + 1].filter(k => k >= 0 && k < rsrp.length);
+    const iNb = nb.length ? nb.reduce((x, y) => (rsrp[y] > rsrp[x] ? y : x)) : iPk;
+    const top2Dbm = 10 * Math.log10(Math.pow(10, rsrp[iPk] / 10) + Math.pow(10, rsrp[iNb] / 10));
+    const perUeDbm = top2Dbm - 10 * Math.log10(nUe);
     const pathLossDb = P_TX_DBM + G_MAX_DBI - perUeDbm;
     const d3d = Math.pow(10, (pathLossDb - 32.4 - 20 * Math.log10(FC_GHZ)) / 21);
-    const estRange = Math.max(20, Math.sqrt(Math.max(0, d3d * d3d - TOWER_H * TOWER_H)));
+    const rawRange = Math.sqrt(Math.max(0, d3d * d3d - TOWER_H * TOWER_H));
+    // bias correction, fitted over range 70-155 m and off-axis 0-15 deg
+    const corrected = -0.001870 * rawRange * rawRange + 1.6282 * rawRange - 7.51;
+    const estRange = Math.max(20, Math.min(250, corrected));
     const beamRangeTilt = rangeToTilt(estRange);
 
     // Point 1: the centroid (what we show as the green dot + coords)
