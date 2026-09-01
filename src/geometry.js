@@ -175,9 +175,14 @@ export function rsrpPerBeam(ues, fanCenter) {
     members[bestB]++;
   }
 
+  // MEAN per UE, not the sum. RSRP is what ONE device receives; the standard counter is
+  // a distribution of individual readings. Summing N users adds 10*log10(N) of gain that
+  // was never in the channel and pushes past the TS 38.133 ceiling of -31 dBm, after
+  // which the reading stops responding to distance. The mean never saturates.
+  const nUeTotal = Math.max(1, ues.length);
   const rsrp = new Array(N).fill(RSRP_MIN);
   for (let b = 0; b < N; b++) {
-    if (linSum[b] > 0) rsrp[b] = quantizeRsrp(10 * Math.log10(linSum[b]));
+    if (linSum[b] > 0) rsrp[b] = quantizeRsrp(10 * Math.log10(linSum[b] / nUeTotal));
   }
   return { rsrp, members, azimuths: azs.map(a => +a.toFixed(1)) };
 }

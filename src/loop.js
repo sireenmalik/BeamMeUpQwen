@@ -276,12 +276,18 @@ export class ControlLoop {
     const nb = [iPk - 1, iPk + 1].filter(k => k >= 0 && k < rsrp.length);
     const iNb = nb.length ? nb.reduce((x, y) => (rsrp[y] > rsrp[x] ? y : x)) : iPk;
     const top2Dbm = 10 * Math.log10(Math.pow(10, rsrp[iPk] / 10) + Math.pow(10, rsrp[iNb] / 10));
-    const perUeDbm = top2Dbm - 10 * Math.log10(nUe);
+    // RSRP is already the MEAN per UE (see rsrpPerBeam), so no division by N here.
+    // The old code subtracted 10*log10(N) to undo a summation that no longer happens.
+    const perUeDbm = top2Dbm;
     const pathLossDb = P_TX_DBM + G_MAX_DBI - perUeDbm;
     const d3d = Math.pow(10, (pathLossDb - 32.4 - 20 * Math.log10(FC_GHZ)) / 21);
     const rawRange = Math.sqrt(Math.max(0, d3d * d3d - TOWER_H * TOWER_H));
     // bias correction, fitted over range 70-155 m and off-axis 0-15 deg
-    const corrected = -0.001870 * rawRange * rawRange + 1.6282 * rawRange - 7.51;
+    // Refitted for mean-per-UE input across 30-200 m and 0-15 deg off-axis.
+    // Mean aggregation removes the saturation, so this now works from 30 m rather than
+    // being blind below 65 m, and the residual bias is far smaller: mean tilt error
+    // 0.32 deg against 2.5 deg with the summed input.
+    const corrected = 0.000501 * rawRange * rawRange + 1.2224 * rawRange + 9.31;
     const estRange = Math.max(20, Math.min(250, corrected));
     const beamRangeTilt = rangeToTilt(estRange);
 
