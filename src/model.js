@@ -12,23 +12,33 @@
 const PROVIDER = (process.env.MODEL_PROVIDER || "none").toLowerCase();
 
 // ---- the prompt the LLM sees (few-shot, parameter-out) ----
-function buildPrompt(obs) {
-  // MUST match to_messages() in gen_v7.py exactly.
-  //
-  // current_fan_center is deliberately ABSENT. The weighted centroid is fully
-  // determined by the RSRP profile and the beam azimuths - the current beam position
-  // does not appear in the equation. Supplying it gave the model a scalar to copy, and
-  // it did: the same profile returned -10 when told the beam was at -10, and 0 when
-  // told it was at 0, while the crowd sat at +16. The azimuths carry the frame.
-  //
-  // tilt is not requested either. It is atan(tower_height / range), computed in the
-  // harness. There is exactly one right answer for a given range, so it is arithmetic.
-  return `You are a Non-RT RIC rApp steering a grid of uplink beams toward the load in a cell. \
-You are given SS-RSRP per SSB beam in dBm and the azimuth each beam points at. \
-Return ONLY one JSON object with keys: fan_center (-49..49), action \
-(follow|widen|allocate), reason (short). No prose, no thinking, JSON only.
+// Format numbers EXACTLY as Python's json.dumps does in gen_v7.py, because the adapter
+// was trained on that byte sequence. JavaScript's JSON.stringify writes "[-42,-33]" while
+// Python writes "[-45, -33]" - different tokens, and the model has never seen the former.
+// Python also renders floats as "15.0" where JS renders "15". Both matter to a 0.5B model.
+function fmtInts(a)  { return "[" + a.map(v => String(Math.round(v))).join(", ") + "]"; }
+function fmtOneDp(a) { return "[" + a.map(v => v.toFixed(1)).join(", ") + "]"; }
 
-ssb_rsrp_dBm=${JSON.stringify(obs.ssbRsrp)} (beam azimuths ${JSON.stringify(obs.beamAzimuths)} deg)`;
+// SYSTEM text, byte-identical to SYSTEM in gen_v7.py.
+const SYSTEM_PROMPT =
+  "You are a Non-RT RIC rApp steering a grid of uplink beams toward the load in a cell. " +
+  "You are given SS-RSRP per SSB beam in dBm and the azimuth each beam points at. " +
+  "Return ONLY one JSON object with keys: fan_center (-49..49), action " +
+  "(follow|widen|allocate), reason (short). No prose, no thinking, JSON only.";
+
+// USER text, byte-identical to the user turn in to_messages().
+//
+// current_fan_center is deliberately ABSENT: the weighted centroid is fully determined by
+// the RSRP profile and the beam azimuths, so supplying the current beam position only gave
+// the model a scalar to copy - and it did. tilt is absent too; it is atan(h/range),
+// computed in the harness, with exactly one right answer for a given range.
+function buildUser(obs) {
+  return `ssb_rsrp_dBm=${fmtInts(obs.ssbRsrp)} (beam azimuths ${fmtOneDp(obs.beamAzimuths)} deg)`;
+}
+
+// Kept for callers that still want one string.
+function buildPrompt(obs) {
+  return SYSTEM_PROMPT + "\n\n" + buildUser(obs);
 }
 
 // ---- deterministic fallback (also the "no model" path) ----
@@ -53,7 +63,8 @@ async function callAnthropic(obs) {
     model: process.env.MODEL_NAME || "claude-sonnet-4-6",
     max_tokens: 200,
     temperature: 0,
-    messages: [{ role: "user", content: buildPrompt(obs) }]
+    messages: [{ role: "system", content: SYSTEM_PROMPT },
+                { role: "user", content: buildUser(obs) }]
   };
   const r = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
@@ -81,8 +92,9 @@ async function callOpenAICompatible(obs) {
     body: JSON.stringify({
       model: process.env.MODEL_NAME || "qwen2.5:1.5b",
       temperature: 0,
-      max_tokens: 120,
-      messages: [{ role: "user", content: buildPrompt(obs) }],
+      max_tokens: 80,
+      messages: [{ role: "system", content: SYSTEM_PROMPT },
+                 { role: "user", content: buildUser(obs) }],
       chat_template_kwargs: { enable_thinking: false }
     })
   });
