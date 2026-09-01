@@ -19,14 +19,19 @@ const PROVIDER = (process.env.MODEL_PROVIDER || "none").toLowerCase();
 // broken in a way that is hard to attribute. That happened repeatedly, so the schema is
 // selected explicitly and pinned to the adapter rather than left implicit.
 //
-//   PROMPT_SCHEMA=v7   fan_center only. Tilt computed in the harness.  (default)
-//   PROMPT_SCHEMA=v8   fan_center + tilt from the model.
+//   PROMPT_SCHEMA=v7   fan_center only. Tilt computed in the harness.
+//   PROMPT_SCHEMA=v8   fan_center only. Same contract as v7, pairs with beam-v8.
+//   PROMPT_SCHEMA=v9   fan_center AND tilt from the model.
 //
-// Set it alongside MODEL_NAME. To roll back to v7 change BOTH:
-//     MODEL_NAME=beam-v7
-//     PROMPT_SCHEMA=v7
+// Set it alongside MODEL_NAME so the pair is obvious:
+//     MODEL_NAME=beam-v8   PROMPT_SCHEMA=v8
+//     MODEL_NAME=beam-v9   PROMPT_SCHEMA=v9
+//
+// Getting this wrong does not throw. The model simply produces a memorised value and the
+// beam looks broken in a way that is hard to attribute, so the schema is pinned to the
+// adapter explicitly rather than left implicit.
 // ---------------------------------------------------------------------------
-const PROMPT_SCHEMA = (process.env.PROMPT_SCHEMA || "v7").toLowerCase();
+const PROMPT_SCHEMA = (process.env.PROMPT_SCHEMA || "v8").toLowerCase();
 
 // Format numbers EXACTLY as Python's json.dumps does in the generator, because the
 // adapter was trained on that byte sequence. JavaScript's JSON.stringify writes
@@ -55,11 +60,20 @@ const SCHEMAS = {
   },
 
   // -------------------------------------------------------------- v8
+  // Identical contract to v7. It exists so MODEL_NAME=beam-v8 pairs with
+  // PROMPT_SCHEMA=v8 and nobody has to translate between the two.
+  v8: {
+    system: null,   // copied from v7 below
+    user: null,
+    usesModelTilt: false,
+  },
+
+  // -------------------------------------------------------------- v8
   // Adds tilt. current_tilt stays OUT for the same reason current_fan_center did: given
   // it, the model echoed it back and the beam kept the wrong range while the crowd walked
   // away. Range must be inferable from the profile, so the generator has to vary crowd
   // distance widely or "always say 14" wins.
-  v8: {
+  v9: {
     system:
       "You are a Non-RT RIC rApp steering a grid of uplink beams toward the load in a cell. " +
       "You are given SS-RSRP per SSB beam in dBm and the azimuth each beam points at. " +
@@ -71,9 +85,12 @@ const SCHEMAS = {
   },
 };
 
-const SCHEMA = SCHEMAS[PROMPT_SCHEMA] || SCHEMAS.v7;
+SCHEMAS.v8.system = SCHEMAS.v7.system;   // v8 is a copy of v7
+SCHEMAS.v8.user   = SCHEMAS.v7.user;
+
+const SCHEMA = SCHEMAS[PROMPT_SCHEMA] || SCHEMAS.v8;
 if (!SCHEMAS[PROMPT_SCHEMA]) {
-  console.warn(`PROMPT_SCHEMA="${PROMPT_SCHEMA}" is unknown, falling back to v7`);
+  console.warn(`PROMPT_SCHEMA="${PROMPT_SCHEMA}" is unknown, falling back to v8`);
 }
 export const USES_MODEL_TILT = SCHEMA.usesModelTilt;
 
