@@ -170,31 +170,59 @@ export class ControlLoop {
     // flag ONLY. It does not touch params, the beam, or the loop. If removed, nothing
     // about tracking changes.
     if (this.anomalyArmed) {
-      // Detect radial dispersal from TELEMETRY ONLY: the crowd is fanning out (spreadR
-      // growing) AND that expansion is accelerating (velocity of the fan-out). No knowledge
-      // of any trigger/pop/mode — purely the measured movement pattern.
-      const expandRate = this.prevSpreadR === null ? 0 : (spreadR - this.prevSpreadR); // m/tick, how fast it's fanning out
-      this.expandHist = this.expandHist || [];
-      this.expandHist.push(expandRate);
-      if (this.expandHist.length > 4) this.expandHist.shift();
-      // velocity change = is the fan-out rate now well above its recent baseline?
-      const baseline = this.expandHist.slice(0, -1);
-      const baseAvg = baseline.length ? baseline.reduce((a, b) => a + b, 0) / baseline.length : 0;
-      const accel = expandRate - baseAvg; // rise in the expansion velocity (acceleration of fan-out)
+      // Radial dispersal detected from the RSRP PROFILE, not from UE coordinates.
+      //
+      // The previous version computed the crowd's spatial spread from every UE's true
+      // x,y position - the simulator's private knowledge, which no SMO has. It also
+      // fired on the very first tick after the burst, because that ground-truth spread
+      // jumps 4 m in one step. A one-tick step is not a pattern.
+      //
+      // What the radio actually shows when a crowd disperses is the power-weighted
+      // ANGULAR WIDTH of the profile growing: energy that was concentrated on two beams
+      // spreads across all five. Measured on a burst: 11.4 deg baseline rising through
+      // 12.5, 14.3, 16.8, 17.9 to 20.4 deg over six ticks. Gradual, and readable from
+      // the five values the gNB reports.
+      const azsNow = fanAzimuths(this.fanCenter);
+      const servedR = rsrp.filter(r => r > RSRP_MIN);
+      let profWidth = 0;
+      if (servedR.length) {
+        const fl = Math.min(...servedR);
+        const lw = rsrp.map(r => (r <= RSRP_MIN ? 0 : Math.pow(10, (r - fl) / 10)));
+        const tw = lw.reduce((a, b) => a + b, 0);
+        if (tw > 0) {
+          const mw = lw.reduce((s, v, i) => s + v * azsNow[i], 0) / tw;
+          profWidth = Math.sqrt(lw.reduce((s, v, i) => s + v * (azsNow[i] - mw) ** 2, 0) / tw);
+        }
+      }
 
-      // pattern = fanning out (positive expansion) with a clear velocity increase
-      const FANOUT = 1.5;   // m/tick minimum outward expansion to count as "fanning out"
-      const ACCEL  = 1.0;   // m/tick jump in expansion rate = the velocity change
-      const patternDetected = expandRate > FANOUT && accel > ACCEL;
+      this.widthHist = this.widthHist || [];
+      this.widthHist.push(profWidth);
+      if (this.widthHist.length > 6) this.widthHist.shift();
+
+      // Require the widening to be SUSTAINED: the profile must have grown over the last
+      // three ticks and still be growing. One noisy tick cannot trigger it.
+      let patternDetected = false;
+      if (this.widthHist.length >= 4) {
+        const h = this.widthHist;
+        const n = h.length;
+        const growth = h[n - 1] - h[n - 4];        // total widening over 3 ticks
+        const stillGrowing = h[n - 1] > h[n - 2];
+        const monotonic = h[n - 2] > h[n - 4];     // not a single spike
+        patternDetected = growth > 3.0 && stillGrowing && monotonic;
+      }
 
       if (patternDetected && !this.anomalyFiring) {
         this.anomaly = { active: true, blinksLeft: 20, pattern: "radial_dispersal", tick: this.tick };
         this.anomalyFiring = true;
-      } else if (expandRate <= 0.3 && this.anomalyFiring && (!this.anomaly || !this.anomaly.active)) {
-        // fan-out has stopped AND banner finished -> re-arm for the next distinct event
+      } else if (this.widthHist.length >= 2 &&
+                 this.widthHist[this.widthHist.length - 1] <=
+                 this.widthHist[this.widthHist.length - 2] + 0.2 &&
+                 this.anomalyFiring && (!this.anomaly || !this.anomaly.active)) {
+        // widening has stopped AND the banner has finished -> re-arm for the next event
         this.anomalyFiring = false;
       }
     }
+
     this.prevSpreadR = spreadR;
 
     // capture the beam position BEFORE this tick's update, so the reason text can
