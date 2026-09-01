@@ -11,32 +11,76 @@
 
 const PROVIDER = (process.env.MODEL_PROVIDER || "none").toLowerCase();
 
-// ---- the prompt the LLM sees (few-shot, parameter-out) ----
-// Format numbers EXACTLY as Python's json.dumps does in gen_v7.py, because the adapter
-// was trained on that byte sequence. JavaScript's JSON.stringify writes "[-42,-33]" while
-// Python writes "[-45, -33]" - different tokens, and the model has never seen the former.
-// Python also renders floats as "15.0" where JS renders "15". Both matter to a 0.5B model.
+// ---------------------------------------------------------------------------
+// PROMPT SCHEMAS
+//
+// Each trained adapter expects the exact prompt shape it was trained on. Getting this
+// wrong does not throw - the model simply produces a memorised value and the beam looks
+// broken in a way that is hard to attribute. That happened repeatedly, so the schema is
+// selected explicitly and pinned to the adapter rather than left implicit.
+//
+//   PROMPT_SCHEMA=v7   fan_center only. Tilt computed in the harness.  (default)
+//   PROMPT_SCHEMA=v8   fan_center + tilt from the model.
+//
+// Set it alongside MODEL_NAME. To roll back to v7 change BOTH:
+//     MODEL_NAME=beam-v7
+//     PROMPT_SCHEMA=v7
+// ---------------------------------------------------------------------------
+const PROMPT_SCHEMA = (process.env.PROMPT_SCHEMA || "v7").toLowerCase();
+
+// Format numbers EXACTLY as Python's json.dumps does in the generator, because the
+// adapter was trained on that byte sequence. JavaScript's JSON.stringify writes
+// "[-42,-33]" while Python writes "[-45, -33]" - different tokens, and the model has
+// never seen the former. Python also renders floats as "15.0" where JS renders "15".
+// Both differences matter to a 0.5B model.
 function fmtInts(a)  { return "[" + a.map(v => String(Math.round(v))).join(", ") + "]"; }
 function fmtOneDp(a) { return "[" + a.map(v => v.toFixed(1)).join(", ") + "]"; }
 
-// SYSTEM text, byte-identical to SYSTEM in gen_v7.py.
-const SYSTEM_PROMPT =
-  "You are a Non-RT RIC rApp steering a grid of uplink beams toward the load in a cell. " +
-  "You are given SS-RSRP per SSB beam in dBm and the azimuth each beam points at. " +
-  "Return ONLY one JSON object with keys: fan_center (-49..49), action " +
-  "(follow|widen|allocate), reason (short). No prose, no thinking, JSON only.";
+const SCHEMAS = {
+  // -------------------------------------------------------------- v7
+  // Byte-identical to gen_v7.py. current_fan_center is deliberately absent: the weighted
+  // centroid is fully determined by the RSRP profile and the beam azimuths, so supplying
+  // the current beam position only gave the model a scalar to copy - and it did. tilt is
+  // absent too; it is atan(h/range), with exactly one right answer for a given range.
+  v7: {
+    system:
+      "You are a Non-RT RIC rApp steering a grid of uplink beams toward the load in a cell. " +
+      "You are given SS-RSRP per SSB beam in dBm and the azimuth each beam points at. " +
+      "Return ONLY one JSON object with keys: fan_center (-49..49), action " +
+      "(follow|widen|allocate), reason (short). No prose, no thinking, JSON only.",
+    user: (obs) =>
+      `ssb_rsrp_dBm=${fmtInts(obs.ssbRsrp)} (beam azimuths ${fmtOneDp(obs.beamAzimuths)} deg)`,
+    // the harness computes tilt; whatever the model returns for it is ignored
+    usesModelTilt: false,
+  },
 
-// USER text, byte-identical to the user turn in to_messages().
-//
-// current_fan_center is deliberately ABSENT: the weighted centroid is fully determined by
-// the RSRP profile and the beam azimuths, so supplying the current beam position only gave
-// the model a scalar to copy - and it did. tilt is absent too; it is atan(h/range),
-// computed in the harness, with exactly one right answer for a given range.
-function buildUser(obs) {
-  return `ssb_rsrp_dBm=${fmtInts(obs.ssbRsrp)} (beam azimuths ${fmtOneDp(obs.beamAzimuths)} deg)`;
+  // -------------------------------------------------------------- v8
+  // Adds tilt. current_tilt stays OUT for the same reason current_fan_center did: given
+  // it, the model echoed it back and the beam kept the wrong range while the crowd walked
+  // away. Range must be inferable from the profile, so the generator has to vary crowd
+  // distance widely or "always say 14" wins.
+  v8: {
+    system:
+      "You are a Non-RT RIC rApp steering a grid of uplink beams toward the load in a cell. " +
+      "You are given SS-RSRP per SSB beam in dBm and the azimuth each beam points at. " +
+      "Return ONLY one JSON object with keys: fan_center (-49..49), tilt (3..45), action " +
+      "(follow|widen|allocate), reason (short). No prose, no thinking, JSON only.",
+    user: (obs) =>
+      `ssb_rsrp_dBm=${fmtInts(obs.ssbRsrp)} (beam azimuths ${fmtOneDp(obs.beamAzimuths)} deg)`,
+    usesModelTilt: true,
+  },
+};
+
+const SCHEMA = SCHEMAS[PROMPT_SCHEMA] || SCHEMAS.v7;
+if (!SCHEMAS[PROMPT_SCHEMA]) {
+  console.warn(`PROMPT_SCHEMA="${PROMPT_SCHEMA}" is unknown, falling back to v7`);
 }
+export const USES_MODEL_TILT = SCHEMA.usesModelTilt;
 
-// Kept for callers that still want one string.
+const SYSTEM_PROMPT = SCHEMA.system;
+function buildUser(obs) { return SCHEMA.user(obs); }
+
+// Kept for callers that want one string.
 function buildPrompt(obs) {
   return SYSTEM_PROMPT + "\n\n" + buildUser(obs);
 }

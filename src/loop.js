@@ -4,7 +4,7 @@
 
 import { Crowd } from "./crowd.js";
 import { AzimuthSmoother } from "./filter.js";
-import { decide, MODEL_INFO } from "./model.js";
+import { decide, MODEL_INFO, USES_MODEL_TILT } from "./model.js";
 import { validateAndFormat } from "./formatter.js";
 import { countPerBeam, beamCentroid, fanAzimuths, rangeToTilt, toPolar,
          rsrpPerBeam, rsrpCentroid, RSRP_MIN } from "./geometry.js";
@@ -282,14 +282,33 @@ export class ControlLoop {
       chosenFan = modelFan;
     }
 
-    // TILT IS ARITHMETIC, NOT JUDGEMENT.
+    // TILT: who owns it depends on the prompt schema (see model.js).
+    //
+    //   v7  the harness computes it. tilt = atan(tower_height / range), one right answer
+    //       for a given range. The v7 adapter was never trained to produce it and simply
+    //       echoed whatever it was handed, so the beam kept the wrong range.
+    //   v8  the model produces it, and is trained to. If it returns something unusable
+    //       we hold the previous tilt rather than silently substituting the arithmetic -
+    //       that would hide a model failure behind a correct-looking beam.
+    //
+    // ORIGINAL NOTE, still true for v7:
     //
     // tilt = atan(tower_height / range). There is nothing to decide - given the crowd's
     // range there is exactly one correct down-angle. The model was echoing whatever tilt
     // it was handed (24.4 deg every tick), so the beam stayed at ~60 m while the crowd
     // walked out to 100 m: correct bearing, short range. Compute it in the harness and
     // let the model own the bearing, which is the part with a real decision in it.
-    chosenTilt = beamRangeTilt;
+    if (USES_MODEL_TILT) {
+      if (Number.isFinite(modelTilt) && modelTilt >= 3 && modelTilt <= 45) {
+        chosenTilt = modelTilt;
+      } else {
+        chosenTilt = this.tilt;                    // hold, do not substitute the maths
+        if (dec.source === "model") dec.source = "model-partial";
+        dec.notes.push("model tilt unusable, holding previous tilt");
+      }
+    } else {
+      chosenTilt = beamRangeTilt;                  // v7: arithmetic
+    }
 
     params.fan_center = +chosenFan.toFixed(2);
     params.tilt = +chosenTilt.toFixed(1);
