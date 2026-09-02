@@ -200,7 +200,7 @@ export default function App() {
       <header className="flex items-center justify-between px-4 py-1.5 border-b border-slate-200 shrink-0">
         <div>
           <h1 className="text-sm font-bold text-slate-900 leading-tight">Crowd-Following Beam</h1>
-          <p className="text-[10px] text-slate-500 leading-tight">LLM rApp · gNB → Near-RT RIC → SMO → rApp loop</p>
+          <p className="text-[10px] text-slate-500 leading-tight">LLM rApp · gNB → SMO → rApp loop</p>
         </div>
         <div className="text-[11px] text-slate-500 text-right">
           <span className={`inline-block px-2 py-0.5 rounded-full text-[10px] font-semibold mr-2 ${state?.running ? "bg-teal-100 text-teal-700" : "bg-slate-200 text-slate-500"}`}>
@@ -268,12 +268,12 @@ export default function App() {
         </div>
 
         <div className="flex-[3] min-h-0 grid grid-cols-3 gap-2 overflow-hidden">
-          <KVPanel title="gNodeB → Near-RT RIC (xApp) · E2 · E2SM-KPM" tone="slate" rows={[
+          <KVPanel title="gNodeB → SMO · O1 · PM (VES)" tone="slate" rows={[
             ["SS-RSRP per SSB", e2 ? `[${e2["SS.RSRP_perSSB_dBm"].join(", ")}] dBm` : "—"],
             ["RRC.ConnMean", e2?.["RRC.ConnMean"] ?? "—"],
             ["beam azimuths", e2 ? `[${e2.beam_azimuths.join(", ")}]°` : "—"],
             ["spec", "SS-RSRP TS 38.215/38.133 · RRC.ConnMean TS 28.552"],
-            ["carried on", "E2SM-KPM REPORT"],
+            ["carried on", "O1 PM · VES over REST"],
           ]} />
           <KVPanel title="SMO → rApp · R1 · DME" tone="teal" rows={[
             ["RSRP-weighted az", r1 ? `${r1.rsrp_weighted_az}°` : "—"],
