@@ -2,9 +2,10 @@
 // Top-down world is meters. Tower at origin. Azimuth measured in degrees from +Y (north),
 // positive clockwise. Tilt maps to a ground range via r = h / tan(theta_elevation).
 //
-// The model NEVER sees UE positions. It sees only per-beam counts. Everything here that
-// touches positions is the *simulator's* private truth used to (a) move the crowd and
-// (b) compute what each beam would count. That honest wall is the whole point.
+// The model NEVER sees UE positions. It sees only the per-beam SS-RSRP profile and the
+// beam azimuths. Everything here that touches positions is the *simulator's* private
+// truth used to (a) move the crowd and (b) compute what each beam would measure.
+// That honest wall is the whole point.
 
 export const TOWER_H = 25;          // antenna height, meters
 export const N_BEAMS = 5;           // fan of beams (grid-of-beams sensing)
@@ -43,7 +44,8 @@ export function fanAzimuths(fanCenter, span = 30) {
 
 // Count how many UEs fall inside each beam. A UE is "in" beam b if its azimuth is within
 // FAN_HALF_WIDTH of the beam center AND its range is within the tilted coverage band.
-// This is what the gNB reports as KPM — counts only.
+// Simulator-side helper only. Retained because other call sites use it; it is NOT the
+// gNB's reported measurement (see rsrpPerBeam below).
 export function countPerBeam(ues, fanCenter, tiltDeg) {
   const azs = fanAzimuths(fanCenter);
   const centerRange = tiltToRange(tiltDeg);
@@ -75,11 +77,14 @@ export function beamCentroid(counts, fanCenter) {
 }
 // Real RF sensing: per-beam SS-RSRP.
 //
-// This replaces countPerBeam() as the gNB's measurement. A real gNodeB cannot
-// count UEs per beam (no such standard counter exists). What it DOES report is
-// SS-RSRP per SSB beam (3GPP TS 28.552) plus a cell-level UE count.
+// This replaces countPerBeam() as the gNB's measurement. What the gNB reports is
+// SS-RSRP per SSB beam (TS 38.215 / TS 38.133), a Layer 1 quantity collected by the
+// xApp on the Near-RT RIC over E2 (E2SM-KPM), plus a cell-level UE count
+// (RRC.ConnMean, TS 28.552). A per-SSB UE mean does exist (TS 28.552 5.1.1.28.1) but
+// only as a slow O1 PM counter on a granularity period, so it is not available to this
+// fast loop.
 //
-// Physics: 3GPP TR 38.901 UMi-Street-Canyon LOS path loss, a cos^2 antenna
+// Physics: 3GPP TR 38.901 UMi-Street-Canyon LOS path loss, a parabolic antenna
 // pattern, log-normal shadow fading, quantized to the TS 38.133 reporting range.
 //
 // countPerBeam() is left in place — nothing else that uses it breaks.
@@ -127,8 +132,8 @@ function quantizeRsrp(dbm) {
 // best (serving) beam, and report per-beam aggregate RSRP plus beam membership.
 //
 // Returns { rsrp: [dBm x N], members: [count x N], azimuths: [deg x N] }
-//   rsrp     -> SS-RSRP per SSB  (the standard per-beam quantity)
-//   members  -> how many UEs each beam serves (derived, NOT a standard counter)
+//   rsrp     -> SS-RSRP per SSB  (the standard per-beam quantity, TS 38.215/38.133)
+//   members  -> how many UEs each beam serves (derived here, display only)
 //   azimuths -> where each beam currently points (from our own commanded state)
 export function rsrpPerBeam(ues, fanCenter) {
   const azs = fanAzimuths(fanCenter);

@@ -1,7 +1,11 @@
 // formatter.js — the deterministic output-formatter tool.
 // The model returns ONLY parameters (fan_center, tilt, action). This wraps them into the
-// exact A1/O1-style JSON the SMO expects. The model never writes JSON structure, so it
-// cannot break the schema. Also validates + clamps — the gate before commit.
+// R1 config-change request the SMO commits over O1. The model never writes JSON structure,
+// so it cannot break the schema. Also validates + clamps — the gate before commit.
+//
+// Note on naming: this loop has no Near-RT RIC in the return path, so A1 (Non-RT RIC to
+// Near-RT RIC) is not involved. The rApp's target leaves over R1 and the SMO commits it
+// to the gNB over O1 NETCONF/YANG (TS 28.541 CommonBeamformingFunction).
 
 import { AZ_MIN, AZ_MAX, rangeToTilt, tiltToRange } from "./geometry.js";
 
@@ -21,10 +25,10 @@ export function validateAndFormat(params, ctx) {
   const action = ["follow", "allocate", "widen", "hold"].includes(params.action)
     ? params.action : "follow";
 
-  // the SMO-facing A1 policy payload (deterministically built)
-  const a1Policy = {
-    policy_type: "beam_steering",
-    schema: "demo.a1.beam.v1",
+  // the SMO-facing R1 config-change request (deterministically built)
+  const r1Request = {
+    request_type: "beam_steering",
+    schema: "demo.r1.beam.v1",
     ts: ctx.ts,
     target: {
       fan_center_deg: +clampedFan.toFixed(2),
@@ -40,16 +44,16 @@ export function validateAndFormat(params, ctx) {
   const o1Config = {
     schema: "demo.o1.beamform.v1",
     ts: ctx.ts,
-    fan_center_deg: a1Policy.target.fan_center_deg,
-    tilt_deg: a1Policy.target.tilt_deg
+    fan_center_deg: r1Request.target.fan_center_deg,
+    tilt_deg: r1Request.target.tilt_deg
   };
 
   return {
-    a1Policy, o1Config,
+    r1Request, o1Config,
     validation: {
       clamped: wasClamped,
-      fan_in: +fanCenter.toFixed(2), fan_out: a1Policy.target.fan_center_deg,
-      tilt_in: +tilt.toFixed(2), tilt_out: a1Policy.target.tilt_deg
+      fan_in: +fanCenter.toFixed(2), fan_out: r1Request.target.fan_center_deg,
+      tilt_in: +tilt.toFixed(2), tilt_out: r1Request.target.tilt_deg
     },
     reason: params.reason || ""
   };

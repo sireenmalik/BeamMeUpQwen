@@ -1,4 +1,4 @@
-// loop.js — one tick of the gNB / SMO / rApp control loop.
+// loop.js — one tick of the gNB / Near-RT RIC / SMO / rApp control loop.
 // Produces (a) the new beam target and (b) a structured signaling log the UI renders,
 // showing the REAL messages each interface would carry.
 
@@ -110,9 +110,10 @@ export class ControlLoop {
     this.crowd.step();
     const ues = this.crowd.ues;
 
-    // --- gNB: measure SS-RSRP per SSB beam (3GPP TS 28.552) ---
-    // This is what a real gNodeB reports. Per-beam UE counts are NOT a standard
-    // counter; `members` below is derived (best-beam assignment) and is display only.
+    // --- gNB: measure SS-RSRP per SSB beam (TS 38.215 / TS 38.133) ---
+    // Beam-level SS-RSRP is a Layer 1 quantity, collected by the xApp on the Near-RT
+    // RIC over E2 (E2SM-KPM). TS 28.552 5.1.1.28.1 does define a per-SSB UE mean, but
+    // as a slow O1 PM counter; `members` below is derived (best-beam) and display only.
     const sensed = rsrpPerBeam(ues, this.fanCenter);
 
     // Average the RSRP over the last 2 reports before using it.
@@ -246,9 +247,9 @@ export class ControlLoop {
     //   solve for d3d, remove the tower height, take atan.
     //
     // Measured accuracy across the demo's 46-137 m span: mean tilt error 2.5 deg
-    // against an 8 deg beamwidth. It degrades below ~50 m where the aggregated RSRP
-    // hits the TS 38.133 ceiling of -31 dBm and range information is lost; the tool
-    // clamps there rather than producing a wild value.
+    // against the 20 deg HPBW set in geometry.js. It degrades below ~50 m where the
+    // aggregated RSRP hits the TS 38.133 ceiling of -31 dBm and range information is
+    // lost; the tool clamps there rather than producing a wild value.
     //
     // The model is not involved. Tilt has one right answer for a given range.
     // ---------------------------------------------------------------------
@@ -403,15 +404,16 @@ export class ControlLoop {
     dec.committedTilt = params.tilt;
     this.decision = dec;
 
-    // --- SMO: validate + format into A1/O1 (deterministic tool) ---
+    // --- SMO: validate + format into the R1 config-change request, committed over O1
+    //     (deterministic tool) ---
     const ts = Date.now();
     const formatted = validateAndFormat(params, {
       currentFanCenter: this.fanCenter, currentTilt: this.tilt, ts
     });
 
     // apply the committed target
-    this.fanCenter = formatted.a1Policy.target.fan_center_deg;
-    this.tilt = formatted.a1Policy.target.tilt_deg;
+    this.fanCenter = formatted.r1Request.target.fan_center_deg;
+    this.tilt = formatted.r1Request.target.tilt_deg;
     this.lastGoodFan = this.fanCenter;   // remember for UE-floor hold
 
     // escalation gate for chaos
@@ -424,16 +426,17 @@ export class ControlLoop {
     // --- build the signaling log (what each interface carries) ---
     const log = {
       tick: this.tick,
-      gNB_to_SMO_O1: {
-        interface: "O1 · PM (VES)", spec: "3GPP TS 28.552",
+      gNB_to_NearRT_E2: {
+        interface: "E2 · E2SM-KPM",
+        spec: "SS-RSRP TS 38.215/38.133 · RRC.ConnMean TS 28.552",
         "SS.RSRP_perSSB_dBm": rsrp,
         "RRC.ConnMean": load,
         beam_azimuths: sensed.azimuths,
-        note: "per-beam membership is derived, not a standard counter",
+        note: "collected by the xApp on the Near-RT RIC. Per-beam membership is derived for display; TS 28.552 5.1.1.28.1 defines a per-SSB UE mean but as a slow O1 PM counter, not used in this fast loop.",
         beam_members: counts
       },
       SMO_to_rApp_R1: {
-        interface: "R1 · Data Management & Exposure", spec: "O-RAN.WG2.R1AP",
+        interface: "R1 · Data Management & Exposure", spec: "O-RAN.WG2.R1GAP",
         ssb_rsrp: rsrp,
         cell_ue_total: load,
         current: { fan_center_deg: +this.fanCenter.toFixed(2), tilt_deg: +this.tilt.toFixed(2) },
@@ -453,7 +456,7 @@ export class ControlLoop {
       },
       SMO_to_gNB_O1: {
         interface: "O1 · NETCONF/YANG", spec: "3GPP TS 28.541 · CommonBeamformingFunction",
-        a1_policy: formatted.a1Policy,
+        r1_request: formatted.r1Request,
         o1_config: formatted.o1Config,
         validation: formatted.validation
       },
