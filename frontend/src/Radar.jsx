@@ -320,9 +320,9 @@ export default function Radar({ state, mode, onWalk, onSplit }) {
                 rather than as the scene changing. Tinted by which sector serves
                 them, so the split the numbers are computed over is visible. */}
             {(c.ues || []).map((u, i) => (
-              <circle key={`u${c.id}${i}`} cx={wx(u.x)} cy={wy(u.y)} r="1.5"
-                      fill={u.sector === 0 ? "#64748B" : u.sector === 120 ? "#94A3B8" : "#475569"}
-                      opacity="0.55" />
+              <circle key={`u${c.id}${i}`} cx={wx(u.x)} cy={wy(u.y)} r="1.8"
+                      fill={u.sector === 0 ? "#64748B" : u.sector === 120 ? "#94A3B8" : "#334155"}
+                      opacity="0.7" />
             ))}
             <polygon points={`${sx0},${sy0-6} ${sx0-5},${sy0+4} ${sx0+5},${sy0+4}`}
                      fill="#0E2A47" stroke="#fff" strokeWidth="1" />

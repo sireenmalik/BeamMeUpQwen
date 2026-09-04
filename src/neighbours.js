@@ -143,7 +143,11 @@ const SECTOR_AZ = [0, 120, 240];
 // into a hot patch moved the whole sector reading by a couple of dB. 60 matches
 // our own crowd size and steadies the numbers at negligible compute cost.
 const UES_PER_NEIGHBOUR = 60;
-const UE_SCATTER_M      = 70;      // how far their users sit from their own tower
+// How far their users sit from their own tower. Kept inside the 72 m hex that is
+// drawn for each cell — at 70 m with a Gaussian scatter the tail put users 100 m+
+// out, well outside their own cell outline, and the picture looked like the users
+// belonged to nobody.
+const UE_SCATTER_M      = 55;
 
 function gaussian(sigma) {
   let u = 0, v = 0;
@@ -164,8 +168,8 @@ export class Neighbours {
       const ues = [];
       for (let i = 0; i < UES_PER_NEIGHBOUR; i++) {
         const u = {
-          x: pos.x + gaussian(UE_SCATTER_M / 2),
-          y: pos.y + gaussian(UE_SCATTER_M / 2),
+          x: pos.x + gaussian(UE_SCATTER_M / 2.2),
+          y: pos.y + gaussian(UE_SCATTER_M / 2.2),
           vx: gaussian(0.6), vy: gaussian(0.6)
         };
         // Shadow fading is POSITION-LOCKED, exactly as in geometry.js. A building
@@ -212,9 +216,17 @@ export class Neighbours {
     for (const c of this.cells) {
       for (const u of c.ues) {
         u.x += u.vx; u.y += u.vy;
-        // keep them loosely around their own tower
+        // Keep them inside their own cell. Reversing the velocity alone was not
+        // enough: a user that started in the Gaussian tail, already outside the
+        // radius, just oscillated out there. Pull them back to the boundary as
+        // well as turning them round.
         const dx = u.x - c.x, dy = u.y - c.y;
-        if (Math.hypot(dx, dy) > UE_SCATTER_M) { u.vx = -u.vx; u.vy = -u.vy; }
+        const d  = Math.hypot(dx, dy);
+        if (d > UE_SCATTER_M) {
+          const k = UE_SCATTER_M / d;
+          u.x = c.x + dx * k; u.y = c.y + dy * k;
+          u.vx = -u.vx; u.vy = -u.vy;
+        }
         // evolve the locked fade over 10 m of movement, same Gauss-Markov process
         // and same decorrelation distance as geometry.js uses for our own crowd.
         const moved = Math.hypot(u.x - u._sfX, u.y - u._sfY);
