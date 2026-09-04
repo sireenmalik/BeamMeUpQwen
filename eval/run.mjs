@@ -21,7 +21,7 @@
 // TIER 1 failures are BLOCKING. TIER 2 is reported, not enforced, because the right
 // threshold depends on the adapter.
 // ============================================================================
-
+import "dotenv/config";
 import { fanAzimuths, RSRP_MIN } from "../src/geometry.js";
 
 const ENDPOINT = process.env.MODEL_ENDPOINT || "http://localhost:8000/v1";
