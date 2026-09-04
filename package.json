@@ -7,9 +7,10 @@
   "scripts": {
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
+    "build": "cd frontend && npm run build",
     "eval": "node eval/run.mjs",
     "analyse": "node eval/analyse.mjs",
-    "demo": "npm run eval && npm start"
+    "demo": "npm run eval && npm run build && npm start"
   },
   "dependencies": {
     "cors": "^2.8.5",
