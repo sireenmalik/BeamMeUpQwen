@@ -78,58 +78,124 @@ function heatFill(v) {
   return `rgb(${c[0]},${c[1]},${c[2]})`;
 }
 
-// One site: a circle cut into three 120 degree sectors, each labelled.
-function SiteRose({ cell, gateCell, budget, size = 96 }) {
-  const R = size / 2, cx = R, cy = R;
-  // Screen y grows downward, so a compass bearing of 0 (north) is -90 in SVG terms.
-  const arc = (azDeg) => {
-    const a0 = (-90 + azDeg - 60) * Math.PI / 180;
-    const a1 = (-90 + azDeg + 60) * Math.PI / 180;
-    const p0 = [cx + R * Math.cos(a0), cy + R * Math.sin(a0)];
-    const p1 = [cx + R * Math.cos(a1), cy + R * Math.sin(a1)];
-    return `M ${cx} ${cy} L ${p0[0]} ${p0[1]} A ${R} ${R} 0 0 1 ${p1[0]} ${p1[1]} Z`;
+// ---------------------------------------------------------------------------
+// THE RF PLANNING MAP
+//
+// One map, not three separate widgets. Sites sit where they actually are: a hex
+// lattice at ISD 200 m on 60 degree bearings, our serving site at the bottom and
+// the three it can reach above it. Nine sector numbers.
+//
+// This is the view an RF engineer already knows how to read. The geography is the
+// point: you can see that the beam is leaning toward B before the gate says so.
+//
+// World coordinates are metres, same frame as neighbours.js: +Y is north (our
+// sector boresight), +X is east. SVG y grows downward, so y is flipped on the way
+// in and every bearing is (-90 + az) in SVG terms.
+// ---------------------------------------------------------------------------
+function RfMap({ neighbours, gate, fanCenter, tilt, budget }) {
+  // world extents, metres
+  const X0 = -300, X1 = 300, Y0 = -150, Y1 = 320;
+  const W = 320, H = W * (Y1 - Y0) / (X1 - X0);
+  const sx = (x) => (x - X0) / (X1 - X0) * W;
+  const sy = (y) => H - (y - Y0) / (Y1 - Y0) * H;      // flip
+  const sr = (m) => m / (X1 - X0) * W;                 // scalar metres -> px
+
+  const ISD = 200, HEX_R = sr(ISD / Math.sqrt(3));
+  const PETAL_R = sr(62), HALF = 48;
+
+  const hexPts = (cx, cy) => Array.from({ length: 6 }, (_, i) => {
+    const a = (-90 + i * 60) * Math.PI / 180;
+    return `${cx + HEX_R * Math.cos(a)},${cy + HEX_R * Math.sin(a)}`;
+  }).join(" ");
+
+  const wedge = (cx, cy, r, azDeg, half) => {
+    const a0 = (-90 + azDeg - half) * Math.PI / 180;
+    const a1 = (-90 + azDeg + half) * Math.PI / 180;
+    return `M ${cx} ${cy} L ${cx + r*Math.cos(a0)} ${cy + r*Math.sin(a0)} ` +
+           `A ${r} ${r} 0 0 1 ${cx + r*Math.cos(a1)} ${cy + r*Math.sin(a1)} Z`;
   };
-  const labelPos = (azDeg) => {
-    const a = (-90 + azDeg) * Math.PI / 180;
-    return [cx + 0.58 * R * Math.cos(a), cy + 0.58 * R * Math.sin(a)];
-  };
+
+  const OUR = { x: 0, y: 0 };
+
   return (
-    <div className="flex flex-col items-center">
-      <svg width={size} height={size} className="drop-shadow-sm">
-        {cell.sectors.map(s => {
-          const g = gateCell?.sectors?.find(x => x.az === s.az);
-          const over = g?.overBudget;
-          const [lx, ly] = labelPos(s.az);
-          return (
-            <g key={s.az}>
-              <path d={arc(s.az)} fill={heatFill(s.noiseRise)}
-                    stroke={over ? "#C0492F" : "#ffffff"} strokeWidth={over ? 2.5 : 1.2} />
-              <text x={lx} y={ly + 3.5} textAnchor="middle"
-                    fontSize="11" fontWeight="700"
-                    fill={over ? "#C0492F" : "#0E2A47"}>
-                {s.noiseRise.toFixed(1)}
+    <svg viewBox={`0 0 ${W} ${H}`} className="w-full">
+      {/* hexes */}
+      {[OUR, ...neighbours].map((c, i) => (
+        <polygon key={`h${i}`} points={hexPts(sx(c.x), sy(c.y))} fill="none"
+                 stroke="#CBD5E1" strokeWidth="0.9" />
+      ))}
+
+      {/* neighbour sites: three petals each, heat filled, number in each */}
+      {neighbours.map(c => {
+        const g = gate?.cells?.find(x => x.id === c.id);
+        const cx = sx(c.x), cy = sy(c.y);
+        return (
+          <g key={c.id}>
+            {c.sectors.map(sec => {
+              const gs = g?.sectors?.find(x => x.az === sec.az);
+              const over = gs?.overBudget;
+              const a = (-90 + sec.az) * Math.PI / 180;
+              return (
+                <g key={sec.az}>
+                  <path d={wedge(cx, cy, PETAL_R, sec.az, HALF)}
+                        fill={heatFill(sec.noiseRise)}
+                        stroke={over ? "#C0492F" : "#94A3B8"}
+                        strokeWidth={over ? 2 : 0.7} strokeLinejoin="round" />
+                  <text x={cx + 0.52*PETAL_R*Math.cos(a)}
+                        y={cy + 0.52*PETAL_R*Math.sin(a) + 3}
+                        textAnchor="middle" fontSize="9.5" fontWeight="700"
+                        fill={over ? "#C0492F" : "#0E2A47"}>
+                    {sec.noiseRise.toFixed(1)}
+                  </text>
+                </g>
+              );
+            })}
+            <polygon points={`${cx},${cy-4.5} ${cx-4},${cy+3} ${cx+4},${cy+3}`}
+                     fill="#0E2A47" stroke="#fff" strokeWidth="0.9" />
+            {/* SITE D sits directly above us, so its label goes ABOVE the hex —
+                below it is where our own beam is drawn. */}
+            <text x={cx} y={c.id === "D" ? cy - HEX_R - 4 : cy + HEX_R + 11}
+                  textAnchor="middle" fontSize="9"
+                  fontWeight="700" fill="#334155">SITE {c.id}</text>
+            {g && (
+              <text x={cx} y={c.id === "D" ? cy - HEX_R - 14 : cy + HEX_R + 21}
+                    textAnchor="middle" fontSize="8"
+                    fontWeight={g.overBudget ? "700" : "400"}
+                    fill={g.overBudget ? "#C0492F" : "#94A3B8"}>
+                {g.delta >= 0 ? "+" : ""}{g.delta.toFixed(2)} dB{g.overBudget ? " OVER" : ""}
               </text>
-            </g>
-          );
-        })}
-        <polygon points={`${cx},${cy-5} ${cx-4.5},${cy+3.5} ${cx+4.5},${cy+3.5}`}
-                 fill="#0E2A47" stroke="#fff" strokeWidth="1" />
-      </svg>
-      <div className="text-[10px] font-bold text-slate-700 mt-0.5">SITE {cell.id}</div>
-      {gateCell && (
-        <div className={`text-[9px] font-mono ${gateCell.overBudget ? "text-red-600 font-bold" : "text-slate-400"}`}>
-          {gateCell.delta >= 0 ? "+" : ""}{gateCell.delta.toFixed(2)} dB
-          {gateCell.overBudget ? " OVER" : ""}
-        </div>
-      )}
-      {cell.blockStreak > 0 && (
-        <div className="flex gap-0.5 mt-0.5">
-          {[0,1,2].map(i => (
-            <span key={i} className={`inline-block w-3 h-1 rounded-sm ${i < cell.blockStreak ? "bg-red-500" : "bg-slate-200"}`} />
-          ))}
-        </div>
-      )}
-    </div>
+            )}
+          </g>
+        );
+      })}
+
+      {/* our site: three sectors, the serving one teal, plus the live beam */}
+      {(() => {
+        const cx = sx(0), cy = sy(0);
+        return (
+          <g>
+            {[0,120,240].map(az => (
+              <path key={az} d={wedge(cx, cy, PETAL_R, az, HALF)}
+                    fill={az === 0 ? "#0E7C86" : "#CBD5E1"}
+                    opacity={az === 0 ? 0.30 : 0.45}
+                    stroke="#94A3B8" strokeWidth="0.7" strokeLinejoin="round" />
+            ))}
+            <path d={wedge(cx, cy, sr(150), fanCenter ?? 0, 16)}
+                  fill="#0E7C86" opacity="0.55" />
+            <polygon points={`${cx},${cy-5} ${cx-4.5},${cy+3.5} ${cx+4.5},${cy+3.5}`}
+                     fill="#0E2A47" stroke="#fff" strokeWidth="1" />
+            <text x={cx} y={cy + HEX_R + 11} textAnchor="middle" fontSize="9"
+                  fontWeight="700" fill="#334155">SITE 1 · serving</text>
+          </g>
+        );
+      })()}
+
+      {/* ISD reference */}
+      <line x1={sx(0)} y1={sy(0)} x2={sx(173)} y2={sy(100)}
+            stroke="#94A3B8" strokeWidth="0.7" strokeDasharray="3 3" />
+      <text x={sx(95)} y={sy(58)} fontSize="7.5" fill="#94A3B8"
+            transform={`rotate(-30 ${sx(95)} ${sy(58)})`}>ISD 200 m</text>
+    </svg>
   );
 }
 
@@ -340,26 +406,15 @@ export default function App() {
           )}
           <Radar state={state} mode={active === "linear" ? "walk" : "idle"} onWalk={onWalk} onSplit={() => {}} />
 
-          {/* neighbour sites, right edge of the radar panel.
-              Laid out by true bearing: C at -60 deg upper left, D at 0 deg top,
-              B at +60 deg upper right, matching the hex lattice. */}
+          {/* RF planning map, right edge of the radar panel */}
           {neighbours.length > 0 && (
-            <div className="absolute right-2 top-2 bottom-2 w-52 flex flex-col z-10
-                            bg-white/85 backdrop-blur-sm rounded-lg border border-slate-200 px-2 py-2">
+            <div className="absolute right-2 top-2 bottom-2 w-72 flex flex-col z-10
+                            bg-white/90 backdrop-blur-sm rounded-lg border border-slate-200 px-2 py-2">
               <div className="text-[10px] font-bold uppercase tracking-wide text-slate-400 mb-1">
-                Neighbour sites · ISD 200 m
+                RF planning view · hex lattice
               </div>
-              <div className="flex justify-center">
-                <SiteRose cell={neighbours.find(c => c.id === "D") || neighbours[0]}
-                          gateCell={gate?.cells?.find(g => g.id === "D")} budget={budget} />
-              </div>
-              <div className="flex justify-between mt-1">
-                {["C","B"].map(id => {
-                  const c = neighbours.find(n => n.id === id);
-                  return c ? <SiteRose key={id} cell={c} budget={budget}
-                                       gateCell={gate?.cells?.find(g => g.id === id)} /> : null;
-                })}
-              </div>
+              <RfMap neighbours={neighbours} gate={gate} budget={budget}
+                     fanCenter={state?.fanCenter} tilt={state?.tilt} />
               <div className="mt-auto text-[9px] text-slate-400 leading-snug pt-1">
                 dB noise rise our beam causes, per sector.<br/>
                 budget {budget} dB per move · downlink spill only
