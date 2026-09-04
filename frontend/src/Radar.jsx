@@ -105,6 +105,43 @@ function petalPath(cxm, cym, rM, azDeg, half) {
   return `M ${wx(cxm)} ${wy(cym)} L ${p0[0]} ${p0[1]} A ${r} ${r} 0 0 1 ${p1[0]} ${p1[1]} Z`;
 }
 
+// ---------------------------------------------------------------------------
+// THE ACTUAL ANTENNA PATTERN.
+//
+// The old drawing was a hard-edged patch: the beam started at one range, stopped
+// at another, and outside it there was nothing. That is a coverage footprint, the
+// half-power contour, and it is a reasonable thing to draw. But it made the
+// picture contradict the numbers — the patch stopped at ~120 m while the neighbour
+// at 200 m was lit up red, and nothing on screen explained how.
+//
+// A real beam has no wall. It fades. So the field below is the same gain model the
+// harm calculation uses, sampled over the sector and drawn as it actually falls
+// off, out past the neighbours.
+//
+// 3GPP TR 38.901 Table 7.3-1:
+//   A_H(phi)   = 12 * (phi   / 20)^2   capped at 30 dB
+//   A_V(theta) = 12 * (theta / 20)^2   capped at 30 dB
+//   A          = G_max - min(A_H + A_V, 30)
+// summed over the five beams IN LINEAR POWER, because dB values cannot be added.
+//
+// This is GAIN, not received power. Path loss is a property of how far the
+// receiver is, not of the beam. Including it would collapse the field back into a
+// blob near the tower and hide exactly what we are trying to show.
+const G_MAX_DBI = 15, HPBW = 20, A_MAX = 30;
+function elementGain(azOff, elOff) {
+  const aH = Math.min(12 * Math.pow(azOff / HPBW, 2), A_MAX);
+  const aV = Math.min(12 * Math.pow(elOff / HPBW, 2), A_MAX);
+  return G_MAX_DBI - Math.min(aH + aV, A_MAX);
+}
+// Total gain of the five-beam fan toward a point, in dB.
+function fanGainDb(azs, tiltDeg, azDeg, rangeM) {
+  const depression = Math.atan2(TOWER_H, Math.max(1, rangeM)) * 180 / Math.PI;
+  const elOff = depression - tiltDeg;
+  let lin = 0;
+  for (const b of azs) lin += Math.pow(10, elementGain(azDeg - b, elOff) / 10);
+  return 10 * Math.log10(lin);
+}
+
 function beamWedge(azCenter, halfWidth, nearR, farR, key, fill, gradId) {
   const p1 = polarToScreen(azCenter - halfWidth, nearR);
   const p2 = polarToScreen(azCenter - halfWidth, farR);
@@ -262,8 +299,48 @@ export default function Radar({ state, mode, onWalk, onSplit }) {
             stroke="#cbd5e1" strokeWidth="1" strokeDasharray="4 4" />
       {rings}
 
-      {/* the beam footprint */}
-      {beamWedge(fan, halfW, nearR, farR, "beam", beamFill, "beamGrad")}
+      {/* ---- the beam field, drawn from the real pattern ----
+           Sampled on a polar grid and shaded by gain relative to the peak. It
+           fades rather than stopping, which is why a neighbour at 200 m can be
+           lit while the half-power footprint ends at 120 m. The dashed contour is
+           that half-power edge, kept because it is the useful "who do I actually
+           serve" line — it is now labelled as such instead of pretending to be
+           the whole beam. */}
+      {(() => {
+        const azs = state?.beamAzimuths || [fan - 30, fan - 15, fan, fan + 15, fan + 30];
+        const AZ_STEP = 4, R_STEP = 18, R_MIN = 15, R_MAX = 300;
+        const peak = fanGainDb(azs, tilt, fan, tiltToRange(tilt));
+        const cells = [];
+        for (let a = -74; a < 74; a += AZ_STEP) {
+          for (let r = R_MIN; r < R_MAX; r += R_STEP) {
+            const g = fanGainDb(azs, tilt, a + AZ_STEP / 2, r + R_STEP / 2);
+            const rel = g - peak;                       // dB below the peak
+            if (rel < -20) continue;                    // below this it is invisible
+            // POWER scaling, not amplitude. Amplitude (rel/20) was tried first and
+            // the tail stayed so visible that the field flooded the whole canvas
+            // and washed out the neighbour cells. Power (rel/10) falls off the way
+            // the energy actually does: -5 dB is a third as bright, -10 dB a
+            // tenth, -20 dB gone.
+            const op = Math.pow(10, rel / 10) * 0.75;
+            const p1 = polarToScreen(a, r), p2 = polarToScreen(a, r + R_STEP);
+            const p3 = polarToScreen(a + AZ_STEP, r + R_STEP), p4 = polarToScreen(a + AZ_STEP, r);
+            cells.push(
+              <polygon key={`f${a}_${r}`}
+                points={`${p1.sx},${p1.sy} ${p2.sx},${p2.sy} ${p3.sx},${p3.sy} ${p4.sx},${p4.sy}`}
+                fill={beamFill} opacity={op} stroke="none" />);
+          }
+        }
+        return <g>{cells}</g>;
+      })()}
+
+      {/* half-power footprint, as a contour not a solid */}
+      {(() => {
+        const p1 = polarToScreen(fan - halfW, nearR), p2 = polarToScreen(fan - halfW, farR);
+        const p3 = polarToScreen(fan + halfW, farR),  p4 = polarToScreen(fan + halfW, nearR);
+        return <polygon
+          points={`${p1.sx},${p1.sy} ${p2.sx},${p2.sy} ${p3.sx},${p3.sy} ${p4.sx},${p4.sy}`}
+          fill="none" stroke="#0E7C86" strokeWidth="1.4" strokeDasharray="5 4" opacity="0.85" />;
+      })()}
 
       {/* crowd */}
       {(state?.ues || []).map((u, i) => {
@@ -317,6 +394,9 @@ export default function Radar({ state, mode, onWalk, onSplit }) {
       <g>
         <text x="14" y={H - 44} fontSize="9.5" fill="#94a3b8" fontWeight="700">
           NOISE RISE OUR BEAM CAUSES (dB)
+        </text>
+        <text x="14" y={H - 56} fontSize="9" fill="#94a3b8">
+          shaded field = real antenna pattern, fades not stops · dashed = half-power footprint
         </text>
         {[0, 1, 3, 5, 7, 10].map((v, i) => (
           <rect key={v} x={14 + i * 26} y={H - 38} width="26" height="9" fill={heatFill(v)} />
