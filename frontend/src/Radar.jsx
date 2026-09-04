@@ -20,7 +20,15 @@ import React, { useRef } from "react";
 
 // World is metres. +Y is north, which is our sector boresight. +X is east.
 // SVG y grows downward, so y is flipped on the way to the screen.
-const WX0 = -300, WX1 = 300, WY0 = -135, WY1 = 355;
+// The canvas aspect must match the panel, or the SVG is sized by whichever
+// dimension runs out first and the other one wastes space. The panel is wide and
+// short (roughly 1.7:1), so the world is cropped to the same shape: everything
+// then scales up by about 40 percent instead of letterboxing.
+//
+// The consequence is that the hexes clip at the frame edge. That is fine and it
+// is what a real planning tool looks like — you always see a cropped piece of the
+// grid, never the whole lattice.
+const WX0 = -316, WX1 = 316, WY0 = -70, WY1 = 292;
 const PPM = 1.5;                                   // pixels per metre
 const W = (WX1 - WX0) * PPM, H = (WY1 - WY0) * PPM;
 const TOWER_H = 25;                                // matches backend geometry
@@ -189,11 +197,11 @@ export default function Radar({ state, mode, onWalk, onSplit }) {
               const a = (90 - sec.az) * Math.PI / 180;
               return (
                 <g key={sec.az}>
-                  <path d={petalPath(c.x, c.y, 44, sec.az, 48)}
+                  <path d={petalPath(c.x, c.y, 46, sec.az, 48)}
                         fill={heatFill(sec.noiseRise)}
                         stroke={over ? "#C0492F" : "#94A3B8"}
                         strokeWidth={over ? 2.2 : 0.8} strokeLinejoin="round" />
-                  <text x={wx(c.x + 23 * Math.cos(a))} y={wy(c.y + 23 * Math.sin(a)) + 4}
+                  <text x={wx(c.x + 24 * Math.cos(a))} y={wy(c.y + 24 * Math.sin(a)) + 4}
                         textAnchor="middle" fontSize="11" fontWeight="700"
                         fill={over ? "#C0492F" : "#0E2A47"}>
                     {sec.noiseRise.toFixed(1)}
@@ -203,13 +211,15 @@ export default function Radar({ state, mode, onWalk, onSplit }) {
             })}
             <polygon points={`${sx0},${sy0-6} ${sx0-5},${sy0+4} ${sx0+5},${sy0+4}`}
                      fill="#0E2A47" stroke="#fff" strokeWidth="1" />
-            <text x={sx0} y={labelAbove ? sy0 - HEX_R * PPM - 16 : sy0 + HEX_R * PPM + 15}
-                  textAnchor="middle" fontSize="11" fontWeight="700" fill="#334155">
+            {/* Labels hug the site marker, not the hex edge. The hexes clip at the
+                frame now, so a label pinned to the hex would fall off screen. */}
+            <text x={sx0} y={labelAbove ? sy0 - 92 : sy0 + 88}
+                  textAnchor="middle" fontSize="12" fontWeight="700" fill="#334155">
               SITE {c.id}
             </text>
             {g && (
-              <text x={sx0} y={labelAbove ? sy0 - HEX_R * PPM - 3 : sy0 + HEX_R * PPM + 28}
-                    textAnchor="middle" fontSize="10"
+              <text x={sx0} y={labelAbove ? sy0 - 78 : sy0 + 102}
+                    textAnchor="middle" fontSize="11"
                     fontWeight={g.overBudget ? "700" : "400"}
                     fill={g.overBudget ? "#C0492F" : "#94A3B8"}>
                 {g.delta >= 0 ? "+" : ""}{g.delta.toFixed(2)} dB{g.overBudget ? "  OVER" : ""}
@@ -221,7 +231,7 @@ export default function Radar({ state, mode, onWalk, onSplit }) {
 
       {/* ---- our own site: three sectors, the serving one live ---- */}
       {[120, 240].map(az => (
-        <path key={az} d={petalPath(0, 0, 44, az, 48)} fill="#e2e8f0" opacity="0.7"
+        <path key={az} d={petalPath(0, 0, 46, az, 48)} fill="#e2e8f0" opacity="0.7"
               stroke="#cbd5e1" strokeWidth="0.8" strokeLinejoin="round" />
       ))}
 
