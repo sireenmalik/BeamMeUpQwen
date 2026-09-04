@@ -138,7 +138,11 @@ const SITES = [
 // from ITS OWN tower is closest to.
 const SECTOR_AZ = [0, 120, 240];
 
-const UES_PER_NEIGHBOUR = 20;
+// 60 per site, so roughly 20 per sector. At 20 per site a sector held only 5 to 9
+// users, and a mean over that few is dominated by sampling noise: one user walking
+// into a hot patch moved the whole sector reading by a couple of dB. 60 matches
+// our own crowd size and steadies the numbers at negligible compute cost.
+const UES_PER_NEIGHBOUR = 60;
 const UE_SCATTER_M      = 70;      // how far their users sit from their own tower
 
 function gaussian(sigma) {
