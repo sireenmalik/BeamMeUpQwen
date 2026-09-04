@@ -240,6 +240,55 @@ export default function Radar({ state, mode, onWalk, onSplit }) {
                  strokeWidth={gate?.cells?.find(g => g.id === c.id)?.overBudget ? 2.2 : 1.2} />
       ))}
 
+      {/* PAINT ORDER MATTERS.
+           The beam field is drawn HERE, before the neighbour cells, so the cells
+           sit on top of it. Drawn after, the translucent field washed over the
+           petals and their colours could not be read — which defeats the point of
+           having a heat scale at all. The beam is the background; the cells and
+           their numbers are the foreground. */}
+      {/* ---- the beam field, drawn from the real pattern ----
+           Sampled on a polar grid and shaded by gain relative to the peak. It
+           fades rather than stopping, which is why a neighbour at 200 m can be
+           lit while the half-power footprint ends at 120 m. The dashed contour is
+           that half-power edge, kept because it is the useful "who do I actually
+           serve" line — it is now labelled as such instead of pretending to be
+           the whole beam. */}
+      {(() => {
+        const azs = state?.beamAzimuths || [fan - 30, fan - 15, fan, fan + 15, fan + 30];
+        const AZ_STEP = 4, R_STEP = 18, R_MIN = 15, R_MAX = 300;
+        const peak = fanGainDb(azs, tilt, fan, tiltToRange(tilt));
+        const cells = [];
+        for (let a = -74; a < 74; a += AZ_STEP) {
+          for (let r = R_MIN; r < R_MAX; r += R_STEP) {
+            const g = fanGainDb(azs, tilt, a + AZ_STEP / 2, r + R_STEP / 2);
+            const rel = g - peak;                       // dB below the peak
+            if (rel < -20) continue;                    // below this it is invisible
+            // POWER scaling, not amplitude. Amplitude (rel/20) was tried first and
+            // the tail stayed so visible that the field flooded the whole canvas
+            // and washed out the neighbour cells. Power (rel/10) falls off the way
+            // the energy actually does: -5 dB is a third as bright, -10 dB a
+            // tenth, -20 dB gone.
+            const op = Math.pow(10, rel / 10) * 0.75;
+            const p1 = polarToScreen(a, r), p2 = polarToScreen(a, r + R_STEP);
+            const p3 = polarToScreen(a + AZ_STEP, r + R_STEP), p4 = polarToScreen(a + AZ_STEP, r);
+            cells.push(
+              <polygon key={`f${a}_${r}`}
+                points={`${p1.sx},${p1.sy} ${p2.sx},${p2.sy} ${p3.sx},${p3.sy} ${p4.sx},${p4.sy}`}
+                fill={beamFill} opacity={op} stroke="none" />);
+          }
+        }
+        return <g>{cells}</g>;
+      })()}
+
+      {/* half-power footprint, as a contour not a solid */}
+      {(() => {
+        const p1 = polarToScreen(fan - halfW, nearR), p2 = polarToScreen(fan - halfW, farR);
+        const p3 = polarToScreen(fan + halfW, farR),  p4 = polarToScreen(fan + halfW, nearR);
+        return <polygon
+          points={`${p1.sx},${p1.sy} ${p2.sx},${p2.sy} ${p3.sx},${p3.sy} ${p4.sx},${p4.sy}`}
+          fill="none" stroke="#0E7C86" strokeWidth="1.4" strokeDasharray="5 4" opacity="0.85" />;
+      })()}
+
       {/* ---- neighbour sites: three petals each, heat filled ---- */}
       {neighbours.map(c => {
         const g = gate?.cells?.find(x => x.id === c.id);
@@ -298,49 +347,6 @@ export default function Radar({ state, mode, onWalk, onSplit }) {
       <line x1={CX} y1={CY} x2={edgeR.sx} y2={edgeR.sy}
             stroke="#cbd5e1" strokeWidth="1" strokeDasharray="4 4" />
       {rings}
-
-      {/* ---- the beam field, drawn from the real pattern ----
-           Sampled on a polar grid and shaded by gain relative to the peak. It
-           fades rather than stopping, which is why a neighbour at 200 m can be
-           lit while the half-power footprint ends at 120 m. The dashed contour is
-           that half-power edge, kept because it is the useful "who do I actually
-           serve" line — it is now labelled as such instead of pretending to be
-           the whole beam. */}
-      {(() => {
-        const azs = state?.beamAzimuths || [fan - 30, fan - 15, fan, fan + 15, fan + 30];
-        const AZ_STEP = 4, R_STEP = 18, R_MIN = 15, R_MAX = 300;
-        const peak = fanGainDb(azs, tilt, fan, tiltToRange(tilt));
-        const cells = [];
-        for (let a = -74; a < 74; a += AZ_STEP) {
-          for (let r = R_MIN; r < R_MAX; r += R_STEP) {
-            const g = fanGainDb(azs, tilt, a + AZ_STEP / 2, r + R_STEP / 2);
-            const rel = g - peak;                       // dB below the peak
-            if (rel < -20) continue;                    // below this it is invisible
-            // POWER scaling, not amplitude. Amplitude (rel/20) was tried first and
-            // the tail stayed so visible that the field flooded the whole canvas
-            // and washed out the neighbour cells. Power (rel/10) falls off the way
-            // the energy actually does: -5 dB is a third as bright, -10 dB a
-            // tenth, -20 dB gone.
-            const op = Math.pow(10, rel / 10) * 0.75;
-            const p1 = polarToScreen(a, r), p2 = polarToScreen(a, r + R_STEP);
-            const p3 = polarToScreen(a + AZ_STEP, r + R_STEP), p4 = polarToScreen(a + AZ_STEP, r);
-            cells.push(
-              <polygon key={`f${a}_${r}`}
-                points={`${p1.sx},${p1.sy} ${p2.sx},${p2.sy} ${p3.sx},${p3.sy} ${p4.sx},${p4.sy}`}
-                fill={beamFill} opacity={op} stroke="none" />);
-          }
-        }
-        return <g>{cells}</g>;
-      })()}
-
-      {/* half-power footprint, as a contour not a solid */}
-      {(() => {
-        const p1 = polarToScreen(fan - halfW, nearR), p2 = polarToScreen(fan - halfW, farR);
-        const p3 = polarToScreen(fan + halfW, farR),  p4 = polarToScreen(fan + halfW, nearR);
-        return <polygon
-          points={`${p1.sx},${p1.sy} ${p2.sx},${p2.sy} ${p3.sx},${p3.sy} ${p4.sx},${p4.sy}`}
-          fill="none" stroke="#0E7C86" strokeWidth="1.4" strokeDasharray="5 4" opacity="0.85" />;
-      })()}
 
       {/* crowd */}
       {(state?.ues || []).map((u, i) => {
