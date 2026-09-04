@@ -38,6 +38,7 @@ import { AzimuthSmoother } from "./filter.js";
 import { decide, MODEL_INFO, USES_MODEL_TILT } from "./model.js";
 import { validateAndFormat } from "./formatter.js";
 import { record as recordReference } from "./reference.js";
+import { Neighbours } from "./neighbours.js";
 import { fanAzimuths, toPolar, TOWER_H,
          rsrpPerBeam, rsrpCentroid, RSRP_MIN } from "./geometry.js";
 
@@ -50,6 +51,7 @@ const START_TILT       = Number(process.env.START_TILT ?? 20);        // deg
 export class ControlLoop {
   constructor() {
     this.crowd = new Crowd();
+    this.neighbours = new Neighbours();
     this.smoother = new AzimuthSmoother();
     this.fanCenter = START_FAN_CENTER;
     this.tilt = START_TILT;
@@ -86,6 +88,9 @@ export class ControlLoop {
   async stepAsync() {
     this.tick++;
     this.crowd.step();
+    // Their users walk too. This is why a neighbour's number moves even when our
+    // beam is completely still: our spill pattern is fixed and they walk through it.
+    this.neighbours.step();
     const ues = this.crowd.ues;
 
     // --- gNB: measure SS-RSRP per SSB beam (TS 38.215 / TS 38.133) ---
@@ -267,6 +272,42 @@ export class ControlLoop {
       dec.notes.push("model tilt unusable, holding previous tilt");
     }
 
+    // ------------------------------------------------------------------
+    // NEIGHBOUR GATE. Deterministic. Runs on the model's proposal, before commit.
+    //
+    // Computes what the proposed beam would do to each neighbour cell and blocks
+    // the move if any of them gains more than the budget. It compares BEFORE
+    // against AFTER, not against an absolute ceiling: the absolute noise rise in a
+    // dense reuse-1 network is already 10-25 dB, so an absolute 1 dB test would
+    // block everything ever proposed. What the budget bounds is how much ONE
+    // action may ADD.
+    //
+    // On a block the beam HOLDS, exactly as it does when the model returns nothing.
+    // There is no fallback aim and no partial move — the same rule as everywhere
+    // else in this loop.
+    //
+    // SCOPE: downlink spill only, our tower into their users. Uplink harm is not
+    // computed because there is no UE transmit power in this simulator. See
+    // neighbours.js.
+    // ------------------------------------------------------------------
+    const gate = this.neighbours.evaluate(this.fanCenter, this.tilt, chosenFan, chosenTilt);
+    dec.neighbours = gate;
+
+    if (!gate.allowed) {
+      chosenFan  = this.fanCenter;              // hold
+      chosenTilt = this.tilt;
+      dec.source = "neighbour-blocked";
+      dec.notes.push(`blocked: ${gate.reason}`);
+      // Three consecutive blocks toward the SAME neighbour is not a beam problem.
+      // It means the crowd is walking out of this cell and into that one, so the
+      // right answer is handover, not a bigger tilt. The streak is keyed to the
+      // neighbour, not to the proposed angles: a key built from the knob values
+      // never matches again once the crowd has moved a step.
+      if (gate.handover) {
+        dec.notes.push(`crowd leaving toward ${gate.handover.toward} — handover territory`);
+      }
+    }
+
     params.fan_center = +chosenFan.toFixed(2);
     params.tilt = +chosenTilt.toFixed(1);
     dec.committedFan = params.fan_center;
@@ -350,6 +391,14 @@ export class ControlLoop {
         o1_config: formatted.o1Config,
         validation: formatted.validation
       },
+      neighbour_gate: {
+        interface: "rApp internal · deterministic policy",
+        scope: "downlink spill only, our RU into their UEs",
+        budget_dB: gate.budget,
+        allowed: gate.allowed,
+        cells: gate.cells,
+        handover: gate.handover
+      },
       escalation: this.escalation
     };
     this.lastLog = log;
@@ -365,7 +414,9 @@ export class ControlLoop {
     // used only when the model did not decide, and is labelled as such.
     let reasonText;
     const modelReason = String(params.reason || "").trim();
-    if (this.decision.source === "no-decision") {
+    if (this.decision.source === "neighbour-blocked") {
+      reasonText = `[gate] ${this.decision.neighbours.reason}, holding position`;
+    } else if (this.decision.source === "no-decision") {
       reasonText = "[tool] no usable model output, holding position";
     } else if (modelReason) {
       reasonText = modelReason;                       // the model's own explanation
@@ -409,6 +460,8 @@ export class ControlLoop {
       mode: this.crowd.mode,
       anomaly: this.anomaly,
       anomalyArmed: this.anomalyArmed,
+      neighbours: this.neighbours.snapshot(this.fanCenter, this.tilt),
+      gate: this.decision?.neighbours || null,
       action: this.lastProposal?.action || "follow",
       decision: this.decision || null,
       proposals: this.proposalHistory || [],

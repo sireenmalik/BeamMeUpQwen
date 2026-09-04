@@ -41,6 +41,54 @@ function ModeButton({ label, on, color, onClick, disabled }) {
   );
 }
 
+
+// ---------------------------------------------------------------------------
+// NEIGHBOUR TILES
+//
+// Deliberately a strip beside the radar rather than zooming the radar out to fit
+// four cells. Zooming out costs the crowd, the beam fan and the detail that the
+// radar exists to show. The tiles carry one number each, which is all a neighbour
+// needs on screen.
+//
+// The number is the noise rise OUR beam causes at that cell's users, in dB. It is
+// downlink spill only — our RU into their UEs. See neighbours.js.
+//
+// It moves even when our beam is still, because their users are walking through a
+// fixed spill pattern. That is real, not jitter.
+// ---------------------------------------------------------------------------
+function NeighbourTile({ cell, gateCell, budget }) {
+  const delta = gateCell?.delta;
+  const over  = gateCell?.overBudget;
+  const tone  = over ? "border-red-400 bg-red-50"
+              : (delta != null && delta > budget * 0.6) ? "border-amber-300 bg-amber-50"
+              : "border-slate-200 bg-white";
+  const numTone = over ? "text-red-600" : "text-slate-800";
+  return (
+    <div className={`rounded-lg border px-2.5 py-1.5 ${tone}`}>
+      <div className="flex justify-between items-baseline">
+        <span className="text-[10px] font-bold uppercase tracking-wide text-slate-500">Cell {cell.id}</span>
+        <span className="text-[9px] text-slate-400 font-mono">{cell.dist}m · {cell.az}°</span>
+      </div>
+      <div className="flex items-baseline gap-1.5">
+        <span className={`text-2xl font-bold font-mono ${numTone}`}>{cell.noiseRise.toFixed(1)}</span>
+        <span className="text-[10px] text-slate-400">dB rise</span>
+      </div>
+      {delta != null && (
+        <div className={`text-[10px] font-mono ${over ? "text-red-600 font-bold" : "text-slate-500"}`}>
+          proposed {delta >= 0 ? "+" : ""}{delta.toFixed(2)} dB {over ? "· OVER" : ""}
+        </div>
+      )}
+      {cell.blockStreak > 0 && (
+        <div className="flex gap-0.5 mt-1">
+          {[0,1,2].map(i => (
+            <span key={i} className={`inline-block w-3 h-1 rounded-sm ${i < cell.blockStreak ? "bg-red-500" : "bg-slate-200"}`} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function KVPanel({ title, rows, tone }) {
   const toneMap = { teal: "text-teal-700", slate: "text-slate-600" };
   return (
@@ -125,6 +173,9 @@ export default function App() {
   const e2  = log?.gNB_to_NearRT_E2;
   const r1 = log?.SMO_to_rApp_R1;
   const proposals = state?.proposals || [];
+  const neighbours = state?.neighbours || [];
+  const gate = state?.gate || null;
+  const budget = gate?.budget ?? 1.0;
   const activeHint = MODES.find(m => m.key === active)?.hint || "Pick a mode to start tracking.";
 
   // auto-scroll to newest ONLY when a genuinely new tick arrives AND the user is pinned to bottom.
@@ -244,6 +295,28 @@ export default function App() {
             </div>
           )}
           <Radar state={state} mode={active === "linear" ? "walk" : "idle"} onWalk={onWalk} onSplit={() => {}} />
+
+          {/* neighbour strip, right edge of the radar panel */}
+          {neighbours.length > 0 && (
+            <div className="absolute right-2 top-2 bottom-2 w-40 flex flex-col gap-1.5 z-10">
+              <div className="text-[10px] font-bold uppercase tracking-wide text-slate-400 px-1">
+                Neighbours
+              </div>
+              {neighbours.map(c => (
+                <NeighbourTile key={c.id} cell={c} budget={budget}
+                  gateCell={gate?.cells?.find(g => g.id === c.id)} />
+              ))}
+              <div className="mt-auto px-1 text-[9px] text-slate-400 leading-snug">
+                budget {budget} dB per move · downlink spill only
+              </div>
+              {gate?.handover && (
+                <div className="rounded-lg bg-amber-500 text-white px-2 py-1.5 text-[10px] font-bold leading-snug">
+                  CROWD LEAVING TOWARD {gate.handover.toward}<br/>
+                  <span className="font-normal opacity-90">handover territory, not a beam problem</span>
+                </div>
+              )}
+            </div>
+          )}
         </div>
 
         <div className="flex-[3] min-h-0 grid grid-cols-3 gap-2 overflow-hidden">
@@ -279,6 +352,7 @@ export default function App() {
                       {p.source === "model" && <span className="ml-2 text-emerald-700 not-italic">← LLM</span>}
                       {p.source === "model-partial" && <span className="ml-2 text-amber-700 not-italic">← LLM (tilt held)</span>}
                       {p.source === "no-decision" && <span className="ml-2 text-red-600 not-italic">← no decision · held</span>}
+                      {p.source === "neighbour-blocked" && <span className="ml-2 text-red-600 not-italic">← neighbour gate · BLOCKED</span>}
                     </div>
                     {/* The only thing that can still rewrite the model's number is the
                         formatter's clamp (fan −49..49, tilt 3..45). When it fires, show it. */}
