@@ -31,7 +31,45 @@
 // ============================================================================
 
 import { TOWER_H, P_TX_DBM, G_MAX_DBI, FC_GHZ,
-         fanAzimuths, pathLoss38901, toPolar } from "./geometry.js";
+         fanAzimuths, toPolar } from "./geometry.js";
+
+// ---------------------------------------------------------------------------
+// PATH LOSS TO A NEIGHBOUR IS **NLOS**, NOT LOS.
+//
+// geometry.js uses the UMi-Street-Canyon LOS model for our own cell, and that is
+// frozen because beam-v9 was trained on it. Reusing it for links to a site 200 m
+// away produced absurd numbers: every neighbour sat at 15-29 dB of noise rise at
+// EVERY beam azimuth, with no beam position that left cell D quiet. That is not a
+// gate failure, it is a physics failure — a tower 200 m away across a city is not
+// in line of sight.
+//
+// TR 38.901 gives the LOS probability for UMi:
+//     P_LOS = 18/d2D + exp(-d2D/36)(1 - 18/d2D)   for d2D > 18 m
+// At 200 m that is about 9 percent. So the link to a neighbour site is NLOS
+// essentially always, and modelling it as LOS overstated the interference by
+// roughly 24 dB.
+//
+// TR 38.901 Table 7.4.1-1, UMi-Street Canyon NLOS:
+//     PL'_NLOS = 35.3*log10(d3D) + 22.4 + 21.3*log10(fc) - 0.3*(h_UT - 1.5)
+//     PL_NLOS  = max(PL_LOS, PL'_NLOS)
+//     sigma_SF = 7.82 dB   (not the 4 dB used for LOS)
+//
+// THE INCONSISTENCY, STATED: our own cell is modelled LOS and the neighbour links
+// NLOS. That is not arbitrary — LOS probability falls with distance, roughly 23
+// percent at 100 m where our crowd sits and 9 percent at 200 m where the
+// neighbours are — but it is a coarse approximation, and the real reason the near
+// link stays LOS is that geometry.js cannot change without retraining beam-v9.
+// ---------------------------------------------------------------------------
+const H_UT = 1.5;                                  // UE height, metres
+
+function pathLossLOS(d3d) {
+  return 32.4 + 21 * Math.log10(Math.max(1, d3d)) + 20 * Math.log10(FC_GHZ);
+}
+function pathLossNLOS(d3d) {
+  const nlos = 35.3 * Math.log10(Math.max(1, d3d)) + 22.4
+             + 21.3 * Math.log10(FC_GHZ) - 0.3 * (H_UT - 1.5);
+  return Math.max(pathLossLOS(d3d), nlos);         // per the spec, take the max
+}
 
 // --- radio constants --------------------------------------------------------
 export const BW_HZ      = 100e6;   // 100 MHz, n78
@@ -39,7 +77,7 @@ export const UE_NF_DB   = 7;       // UE noise figure, 3GPP calibration table
 export const HPBW_V_DEG = 20;      // vertical half-power beamwidth
 export const SLA_V_DB   = 30;      // vertical side-lobe floor, TR 38.901 Table 7.3-1
 export const A_MAX_DB   = 30;      // combined attenuation cap, TR 38.901 Table 7.3-1
-export const SF_SIGMA_DB = 4;      // TR 38.901 UMi-LOS, same as geometry.js
+export const SF_SIGMA_DB = 7.82;   // TR 38.901 UMi-NLOS. LOS would be 4.
 
 // Thermal noise floor at a UE receiver.
 //   N = -174 dBm/Hz + NF + 10*log10(BW)
@@ -61,6 +99,18 @@ export const N_DBM = -174 + UE_NF_DB + 10 * Math.log10(BW_HZ);   // -87.0 dBm
 // it — three neighbours at 200 m with line of sight is a dense urban worst case, and
 // a tight gate is the correct answer there. Raise it only with a stated reason.
 export const DELTA_BUDGET_DB = Number(process.env.NEIGHBOUR_BUDGET_DB ?? 1.0);
+
+// OBSERVE MODE. Set NEIGHBOUR_GATE=off to compute and display everything while
+// letting every move commit.
+//
+// This exists so the colours can be judged on their own. With the gate armed you
+// only ever see the beam positions the gate permitted, which is exactly the set
+// of positions least likely to reveal whether the heat map is right. Turn it off,
+// drive the beam wherever you like, and check that the cell you are pointing at
+// goes hot and the ones you are pointing away from go cold.
+//
+// The maths is unchanged in this mode. Only the verdict is forced to allow.
+export const GATE_ENABLED = process.env.NEIGHBOUR_GATE !== "off";
 
 // Consecutive blocks toward the SAME neighbour before we conclude the crowd is
 // leaving the cell and this is handover territory rather than a beam problem.
@@ -202,7 +252,7 @@ export class Neighbours {
   spillOnUeLin(ue, fanCenter, tiltDeg) {
     const { az, range } = toPolar(ue.x, ue.y);          // relative to OUR tower
     const d3d = Math.hypot(range, TOWER_H);
-    const pl  = pathLoss38901(d3d);
+    const pl  = pathLossNLOS(d3d);
 
     // Depression angle down to this user, and how far that is off our tilt.
     const depression = Math.atan2(TOWER_H, Math.max(1, range)) * 180 / Math.PI;
@@ -306,10 +356,16 @@ export class Neighbours {
       const hit = over.find(o => o.id === c.id);
       c.blockStreak = hit ? c.blockStreak + 1 : 0;
     }
-    const streaked = this.cells.find(c => c.blockStreak >= BLOCK_STREAK_LIMIT);
+    const streaked = GATE_ENABLED
+      ? this.cells.find(c => c.blockStreak >= BLOCK_STREAK_LIMIT)
+      : null;
 
     return {
-      allowed: over.length === 0,
+      // In observe mode every move is allowed. `cells` still carries the real
+      // deltas and `overBudget` flags, so the display shows what WOULD have been
+      // blocked without acting on it.
+      allowed: GATE_ENABLED ? over.length === 0 : true,
+      observeMode: !GATE_ENABLED,
       cells,
       worstCell: worst.id,
       worstDelta: worst.delta,

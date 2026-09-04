@@ -60,11 +60,23 @@ function screenToPolar(px, py) {
            range: Math.max(12, Math.min(RANGE_MAX, range)) };
 }
 
-// noise rise -> fill. 0 dB clean, 28 dB saturated.
+// noise rise -> fill.
+//
+// The scale is 0 to 10 dB, not 0 to 28. The 28 came from the earlier version that
+// modelled neighbour links as line of sight and produced 15-30 dB everywhere;
+// with the corrected NLOS path loss the real range is roughly 0.2 to 9 dB, and on
+// a 28 dB scale every cell rendered the same pale blue. A scale has to span the
+// data or it carries no information.
+//
+// 0 dB   untouched
+// 1 dB   the per-move budget, the ITU-R interference protection criterion
+// 5 dB   heavily lit
+// 10 dB+ saturated
+const HEAT_MAX = 10;
 function heatFill(v) {
-  const stops = [[0,[248,250,252]], [5,[220,242,244]], [10,[155,217,222]],
-                 [16,[245,201,122]], [22,[232,145,107]], [28,[192,73,47]]];
-  const t0 = Math.max(0, Math.min(28, v ?? 0));
+  const stops = [[0,[248,250,252]], [1,[220,242,244]], [3,[155,217,222]],
+                 [5,[245,201,122]], [7,[232,145,107]], [10,[192,73,47]]];
+  const t0 = Math.max(0, Math.min(HEAT_MAX, v ?? 0));
   let a = stops[0], b = stops[stops.length - 1];
   for (let i = 0; i < stops.length - 1; i++) {
     if (t0 >= stops[i][0] && t0 <= stops[i+1][0]) { a = stops[i]; b = stops[i+1]; break; }
@@ -306,13 +318,18 @@ export default function Radar({ state, mode, onWalk, onSplit }) {
         <text x="14" y={H - 44} fontSize="9.5" fill="#94a3b8" fontWeight="700">
           NOISE RISE OUR BEAM CAUSES (dB)
         </text>
-        {[0, 5, 10, 16, 22, 28].map((v, i) => (
+        {[0, 1, 3, 5, 7, 10].map((v, i) => (
           <rect key={v} x={14 + i * 26} y={H - 38} width="26" height="9" fill={heatFill(v)} />
         ))}
         <text x="14" y={H - 18} fontSize="9" fill="#94a3b8">0</text>
-        <text x={14 + 6 * 26} y={H - 18} fontSize="9" fill="#94a3b8" textAnchor="end">28+</text>
-        <text x={14 + 6 * 26 + 12} y={H - 29} fontSize="9" fill="#94a3b8">
-          budget {budget} dB per move · downlink spill only · ISD {ISD} m
+        <text x={14 + 2 * 26} y={H - 18} fontSize="9" fill="#94a3b8" textAnchor="middle">1 dB budget</text>
+        <text x={14 + 6 * 26} y={H - 18} fontSize="9" fill="#94a3b8" textAnchor="end">10+</text>
+        <text x={14 + 6 * 26 + 12} y={H - 29} fontSize="9"
+              fill={gate?.observeMode ? "#E08A1E" : "#94a3b8"}
+              fontWeight={gate?.observeMode ? "700" : "400"}>
+          {gate?.observeMode
+            ? `OBSERVE MODE — gate off, every move commits. Deltas still computed.`
+            : `budget ${budget} dB per move · downlink spill only · ISD ${ISD} m`}
         </text>
       </g>
 
