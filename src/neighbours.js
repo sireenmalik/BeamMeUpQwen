@@ -74,11 +74,19 @@ export const BLOCK_STREAK_LIMIT = Number(process.env.BLOCK_STREAK ?? 3);
 // TR 38.901 UMi is ISD 200 m, which is what these distances are drawn from. This
 // is NOT the full 19-site hex grid — that is for statistical evaluation with
 // wrap-around, and it is not what a single-sector demo needs.
+// A hex lattice puts neighbouring sites at ISD on 60 degree bearings. The earlier
+// placement (B and C at 45 deg, D at 260 m) was not a lattice position at all.
+// Our serving sector faces north, so these are the three sites it can reach.
 const SITES = [
-  { id: "B", az:  45, dist: 200 },
-  { id: "C", az: -45, dist: 200 },
-  { id: "D", az:   0, dist: 260 },
+  { id: "B", az:  60, dist: 200 },
+  { id: "C", az: -60, dist: 200 },
+  { id: "D", az:   0, dist: 200 },
 ];
+
+// Every site is tri-sectored on the same orientation, which is how a real
+// deployment is planned. A UE belongs to whichever sector boresight its bearing
+// from ITS OWN tower is closest to.
+const SECTOR_AZ = [0, 120, 240];
 
 const UES_PER_NEIGHBOUR = 20;
 const UE_SCATTER_M      = 70;      // how far their users sit from their own tower
@@ -112,11 +120,36 @@ export class Neighbours {
         // gate fire and unfire at random.
         u._sf  = gaussian(SF_SIGMA_DB);
         u._sfX = u.x; u._sfY = u.y;
+        u.sector = Neighbours.sectorOf(u.x, u.y, pos.x, pos.y);
         ues.push(u);
       }
       return { id: s.id, x: pos.x, y: pos.y, az: s.az, dist: s.dist, ues,
                blockStreak: 0 };
     });
+  }
+
+  // Which of a site's three sectors serves this UE. Bearing from ITS OWN tower,
+  // nearest of 0 / 120 / 240.
+  //
+  // Worth being explicit about what this does NOT do. Sector membership is about
+  // which of THEIR antennas points at the user. How much of OUR energy reaches
+  // that user depends on where they sit relative to OUR tower. Those are
+  // unrelated, so the harm does not concentrate in the sector facing us.
+  // Measured on a +34 degree swing toward B: its three sectors rose +12.7, +14.4
+  // and +12.3 dB. The one pointing back at us was not special.
+  //
+  // The split is therefore a REPORTING improvement, not a tighter safety
+  // property. An operator alarms per cell and a cell is a sector, so three
+  // numbers per site is what an RF engineer expects to read. Do not claim it
+  // makes the gate stricter; measurement says it barely moves the verdict.
+  static sectorOf(ux, uy, sx, sy) {
+    const b = ((Math.atan2(ux - sx, uy - sy) * 180 / Math.PI) % 360 + 360) % 360;
+    let best = SECTOR_AZ[0], bestD = 999;
+    for (const a of SECTOR_AZ) {
+      const d = Math.min(Math.abs(b - a), 360 - Math.abs(b - a));
+      if (d < bestD) { bestD = d; best = a; }
+    }
+    return best;
   }
 
   // Their users walk. This is why a neighbour's number changes even when our beam
@@ -136,6 +169,8 @@ export class Neighbours {
           u._sf = rho * u._sf + Math.sqrt(1 - rho * rho) * gaussian(SF_SIGMA_DB);
           u._sfX = u.x; u._sfY = u.y;
         }
+        // a walking user can cross a sector boundary
+        u.sector = Neighbours.sectorOf(u.x, u.y, c.x, c.y);
       }
     }
   }
@@ -207,13 +242,19 @@ export class Neighbours {
   // ---------------------------------------------------------------------------
   noiseRiseFor(cell, fanCenter, tiltDeg) {
     const nLin = Math.pow(10, N_DBM / 10);
-    const rises = cell.ues.map(u => {
-      const i = this.spillOnUeLin(u, fanCenter, tiltDeg);
-      return 10 * Math.log10((i + nLin) / nLin);
-    });
-    rises.sort((a, b) => b - a);              // worst first
-    return { worst: rises[0],
-             mean: rises.reduce((a, b) => a + b, 0) / rises.length };
+    const per  = { 0: [], 120: [], 240: [] };
+    const all  = [];
+    for (const u of cell.ues) {
+      const i  = this.spillOnUeLin(u, fanCenter, tiltDeg);
+      const nr = 10 * Math.log10((i + nLin) / nLin);
+      all.push(nr);
+      per[u.sector].push(nr);
+    }
+    const avg = a => (a.length ? a.reduce((x, y) => x + y, 0) / a.length : 0);
+    const sectors = {};
+    for (const a of SECTOR_AZ) sectors[a] = { n: per[a].length, mean: avg(per[a]) };
+    all.sort((a, b) => b - a);
+    return { worst: all[0], mean: avg(all), sectors };
   }
 
   // ---------------------------------------------------------------------------
@@ -226,13 +267,32 @@ export class Neighbours {
     const cells = this.cells.map(c => {
       const before = this.noiseRiseFor(c, currentFan,  currentTilt);
       const after  = this.noiseRiseFor(c, proposedFan, proposedTilt);
-      const delta  = after.mean - before.mean;
+      // Per-sector deltas, plus the site-level figure. The gate reads the WORST
+      // SECTOR rather than the site mean. Measurement says the two rarely
+      // disagree, because a swing lifts all three sectors of a site together,
+      // but the worst sector is the honest thing to test: a budget exists to
+      // protect the users who actually suffer, and those sit in one cell.
+      const sectors = SECTOR_AZ.map(a => {
+        const d = after.sectors[a].mean - before.sectors[a].mean;
+        return {
+          az: a,
+          ues: after.sectors[a].n,
+          before: +before.sectors[a].mean.toFixed(2),
+          after:  +after.sectors[a].mean.toFixed(2),
+          delta:  +d.toFixed(2),
+          overBudget: d > DELTA_BUDGET_DB
+        };
+      });
+      const worstSector = sectors.reduce((x, y) => (y.delta > x.delta ? y : x));
       return {
         id: c.id,
+        sectors,
+        worstSectorAz: worstSector.az,
         before: +before.mean.toFixed(2),
         after:  +after.mean.toFixed(2),
-        delta:  +delta.toFixed(2),
-        overBudget: delta > DELTA_BUDGET_DB
+        delta:  +worstSector.delta.toFixed(2),
+        siteDelta: +(after.mean - before.mean).toFixed(2),
+        overBudget: worstSector.delta > DELTA_BUDGET_DB
       };
     });
 
@@ -259,7 +319,7 @@ export class Neighbours {
       // right answer is handover, not a bigger tilt. The cell has done its job.
       handover: streaked ? { toward: streaked.id, streak: streaked.blockStreak } : null,
       reason: over.length
-        ? `${over.map(o => `${o.id} +${o.delta}dB`).join(", ")} over ${DELTA_BUDGET_DB}dB budget`
+        ? `${over.map(o => `${o.id}/${o.worstSectorAz}\u00b0 +${o.delta}dB`).join(", ")} over ${DELTA_BUDGET_DB}dB budget`
         : null
     };
   }
@@ -271,10 +331,16 @@ export class Neighbours {
       return {
         id: c.id, x: +c.x.toFixed(1), y: +c.y.toFixed(1),
         az: c.az, dist: c.dist,
-        noiseRise: +nr.mean.toFixed(2),
+        noiseRise: +nr.mean.toFixed(2),          // site level, all users
         worst: +nr.worst.toFixed(2),
+        // three sectors per site, nine across the layout. This is the unit an
+        // operator alarms on, so it is the unit the display shows.
+        sectors: SECTOR_AZ.map(a => ({
+          az: a, ues: nr.sectors[a].n,
+          noiseRise: +nr.sectors[a].mean.toFixed(2)
+        })),
         blockStreak: c.blockStreak,
-        ues: c.ues.map(u => ({ x: +u.x.toFixed(1), y: +u.y.toFixed(1) }))
+        ues: c.ues.map(u => ({ x: +u.x.toFixed(1), y: +u.y.toFixed(1), sector: u.sector }))
       };
     });
   }

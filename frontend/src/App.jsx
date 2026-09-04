@@ -43,43 +43,87 @@ function ModeButton({ label, on, color, onClick, disabled }) {
 
 
 // ---------------------------------------------------------------------------
-// NEIGHBOUR TILES
+// NEIGHBOUR SITES — the RF planning view
 //
-// Deliberately a strip beside the radar rather than zooming the radar out to fit
-// four cells. Zooming out costs the crowd, the beam fan and the detail that the
-// radar exists to show. The tiles carry one number each, which is all a neighbour
-// needs on screen.
+// Three sites on a hex lattice at ISD 200 m, 60 degree bearings, three sectors
+// each. Nine numbers. That is the layout TR 38.901 UMi describes and the unit an
+// operator actually alarms on: a cell is a sector, not a site.
 //
-// The number is the noise rise OUR beam causes at that cell's users, in dB. It is
-// downlink spill only — our RU into their UEs. See neighbours.js.
+// Each number is the noise rise OUR beam causes for the users in that sector, in
+// dB. Downlink spill only, our RU into their UEs. See neighbours.js.
 //
-// It moves even when our beam is still, because their users are walking through a
-// fixed spill pattern. That is real, not jitter.
+// The numbers move even when our beam is still, because their users are walking
+// through a fixed spill pattern. That is real, not jitter.
+//
+// One thing this display does NOT show, because measurement says it is not true:
+// the harm does not concentrate in the sector facing us. A swing toward a site
+// lifts all three of its sectors by roughly the same amount, because how much of
+// our energy reaches a handset depends on where it sits relative to OUR tower,
+// not on which of THEIR antennas serves it.
 // ---------------------------------------------------------------------------
-function NeighbourTile({ cell, gateCell, budget }) {
-  const delta = gateCell?.delta;
-  const over  = gateCell?.overBudget;
-  const tone  = over ? "border-red-400 bg-red-50"
-              : (delta != null && delta > budget * 0.6) ? "border-amber-300 bg-amber-50"
-              : "border-slate-200 bg-white";
-  const numTone = over ? "text-red-600" : "text-slate-800";
+
+// noise rise -> fill colour. 0 dB clean, 28 dB saturated.
+function heatFill(v) {
+  const stops = [
+    [0,  [248,250,252]], [5,  [220,242,244]], [10, [155,217,222]],
+    [16, [245,201,122]], [22, [232,145,107]], [28, [192,73,47]],
+  ];
+  const x = Math.max(0, Math.min(28, v ?? 0));
+  let a = stops[0], b = stops[stops.length - 1];
+  for (let i = 0; i < stops.length - 1; i++) {
+    if (x >= stops[i][0] && x <= stops[i+1][0]) { a = stops[i]; b = stops[i+1]; break; }
+  }
+  const t = (x - a[0]) / Math.max(1e-6, b[0] - a[0]);
+  const c = a[1].map((v0, i) => Math.round(v0 + t * (b[1][i] - v0)));
+  return `rgb(${c[0]},${c[1]},${c[2]})`;
+}
+
+// One site: a circle cut into three 120 degree sectors, each labelled.
+function SiteRose({ cell, gateCell, budget, size = 96 }) {
+  const R = size / 2, cx = R, cy = R;
+  // Screen y grows downward, so a compass bearing of 0 (north) is -90 in SVG terms.
+  const arc = (azDeg) => {
+    const a0 = (-90 + azDeg - 60) * Math.PI / 180;
+    const a1 = (-90 + azDeg + 60) * Math.PI / 180;
+    const p0 = [cx + R * Math.cos(a0), cy + R * Math.sin(a0)];
+    const p1 = [cx + R * Math.cos(a1), cy + R * Math.sin(a1)];
+    return `M ${cx} ${cy} L ${p0[0]} ${p0[1]} A ${R} ${R} 0 0 1 ${p1[0]} ${p1[1]} Z`;
+  };
+  const labelPos = (azDeg) => {
+    const a = (-90 + azDeg) * Math.PI / 180;
+    return [cx + 0.58 * R * Math.cos(a), cy + 0.58 * R * Math.sin(a)];
+  };
   return (
-    <div className={`rounded-lg border px-2.5 py-1.5 ${tone}`}>
-      <div className="flex justify-between items-baseline">
-        <span className="text-[10px] font-bold uppercase tracking-wide text-slate-500">Cell {cell.id}</span>
-        <span className="text-[9px] text-slate-400 font-mono">{cell.dist}m · {cell.az}°</span>
-      </div>
-      <div className="flex items-baseline gap-1.5">
-        <span className={`text-2xl font-bold font-mono ${numTone}`}>{cell.noiseRise.toFixed(1)}</span>
-        <span className="text-[10px] text-slate-400">dB rise</span>
-      </div>
-      {delta != null && (
-        <div className={`text-[10px] font-mono ${over ? "text-red-600 font-bold" : "text-slate-500"}`}>
-          proposed {delta >= 0 ? "+" : ""}{delta.toFixed(2)} dB {over ? "· OVER" : ""}
+    <div className="flex flex-col items-center">
+      <svg width={size} height={size} className="drop-shadow-sm">
+        {cell.sectors.map(s => {
+          const g = gateCell?.sectors?.find(x => x.az === s.az);
+          const over = g?.overBudget;
+          const [lx, ly] = labelPos(s.az);
+          return (
+            <g key={s.az}>
+              <path d={arc(s.az)} fill={heatFill(s.noiseRise)}
+                    stroke={over ? "#C0492F" : "#ffffff"} strokeWidth={over ? 2.5 : 1.2} />
+              <text x={lx} y={ly + 3.5} textAnchor="middle"
+                    fontSize="11" fontWeight="700"
+                    fill={over ? "#C0492F" : "#0E2A47"}>
+                {s.noiseRise.toFixed(1)}
+              </text>
+            </g>
+          );
+        })}
+        <polygon points={`${cx},${cy-5} ${cx-4.5},${cy+3.5} ${cx+4.5},${cy+3.5}`}
+                 fill="#0E2A47" stroke="#fff" strokeWidth="1" />
+      </svg>
+      <div className="text-[10px] font-bold text-slate-700 mt-0.5">SITE {cell.id}</div>
+      {gateCell && (
+        <div className={`text-[9px] font-mono ${gateCell.overBudget ? "text-red-600 font-bold" : "text-slate-400"}`}>
+          {gateCell.delta >= 0 ? "+" : ""}{gateCell.delta.toFixed(2)} dB
+          {gateCell.overBudget ? " OVER" : ""}
         </div>
       )}
       {cell.blockStreak > 0 && (
-        <div className="flex gap-0.5 mt-1">
+        <div className="flex gap-0.5 mt-0.5">
           {[0,1,2].map(i => (
             <span key={i} className={`inline-block w-3 h-1 rounded-sm ${i < cell.blockStreak ? "bg-red-500" : "bg-slate-200"}`} />
           ))}
@@ -296,23 +340,34 @@ export default function App() {
           )}
           <Radar state={state} mode={active === "linear" ? "walk" : "idle"} onWalk={onWalk} onSplit={() => {}} />
 
-          {/* neighbour strip, right edge of the radar panel */}
+          {/* neighbour sites, right edge of the radar panel.
+              Laid out by true bearing: C at -60 deg upper left, D at 0 deg top,
+              B at +60 deg upper right, matching the hex lattice. */}
           {neighbours.length > 0 && (
-            <div className="absolute right-2 top-2 bottom-2 w-40 flex flex-col gap-1.5 z-10">
-              <div className="text-[10px] font-bold uppercase tracking-wide text-slate-400 px-1">
-                Neighbours
+            <div className="absolute right-2 top-2 bottom-2 w-52 flex flex-col z-10
+                            bg-white/85 backdrop-blur-sm rounded-lg border border-slate-200 px-2 py-2">
+              <div className="text-[10px] font-bold uppercase tracking-wide text-slate-400 mb-1">
+                Neighbour sites · ISD 200 m
               </div>
-              {neighbours.map(c => (
-                <NeighbourTile key={c.id} cell={c} budget={budget}
-                  gateCell={gate?.cells?.find(g => g.id === c.id)} />
-              ))}
-              <div className="mt-auto px-1 text-[9px] text-slate-400 leading-snug">
+              <div className="flex justify-center">
+                <SiteRose cell={neighbours.find(c => c.id === "D") || neighbours[0]}
+                          gateCell={gate?.cells?.find(g => g.id === "D")} budget={budget} />
+              </div>
+              <div className="flex justify-between mt-1">
+                {["C","B"].map(id => {
+                  const c = neighbours.find(n => n.id === id);
+                  return c ? <SiteRose key={id} cell={c} budget={budget}
+                                       gateCell={gate?.cells?.find(g => g.id === id)} /> : null;
+                })}
+              </div>
+              <div className="mt-auto text-[9px] text-slate-400 leading-snug pt-1">
+                dB noise rise our beam causes, per sector.<br/>
                 budget {budget} dB per move · downlink spill only
               </div>
               {gate?.handover && (
-                <div className="rounded-lg bg-amber-500 text-white px-2 py-1.5 text-[10px] font-bold leading-snug">
+                <div className="rounded bg-amber-500 text-white px-2 py-1 text-[10px] font-bold leading-snug mt-1">
                   CROWD LEAVING TOWARD {gate.handover.toward}<br/>
-                  <span className="font-normal opacity-90">handover territory, not a beam problem</span>
+                  <span className="font-normal opacity-90">handover, not a beam problem</span>
                 </div>
               )}
             </div>
