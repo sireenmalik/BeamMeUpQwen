@@ -285,6 +285,7 @@ export default function App() {
                       {p.source === "model-partial" && <span className="ml-2 text-amber-700 not-italic">← LLM (tilt held)</span>}
                       {p.source === "no-decision" && <span className="ml-2 text-red-600 not-italic">← no decision · held</span>}
                       {p.source === "neighbour-blocked" && <span className="ml-2 text-red-600 not-italic">← neighbour gate · BLOCKED</span>}
+                      {p.source === "neighbour-limited" && <span className="ml-2 text-amber-700 not-italic">← neighbour gate · LIMITED</span>}
                     </div>
                     {/* The only thing that can still rewrite the model's number is the
                         formatter's clamp (fan −49..49, tilt 3..45). When it fires, show it. */}

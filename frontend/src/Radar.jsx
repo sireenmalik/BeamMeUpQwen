@@ -28,13 +28,21 @@ import React, { useRef } from "react";
 // The consequence is that the hexes clip at the frame edge. That is fine and it
 // is what a real planning tool looks like — you always see a cropped piece of the
 // grid, never the whole lattice.
-const WX0 = -316, WX1 = 316, WY0 = -70, WY1 = 292;
+// Cropped tight around the serving sector. The anchor is the show; the
+// neighbours are context at the edges. Our 150 m sector now fills about half the
+// canvas height instead of a third.
+const WX0 = -280, WX1 = 280, WY0 = -55, WY1 = 265;
 const PPM = 1.5;                                   // pixels per metre
 const W = (WX1 - WX0) * PPM, H = (WY1 - WY0) * PPM;
 const TOWER_H = 25;                                // matches backend geometry
 const RANGE_MAX = 150;                             // our own sector's drawn reach
 const ISD = 200;
-const HEX_R = ISD / Math.sqrt(3);                  // centre to vertex, metres
+// Hex radius is a DRAWING choice, not physics. The geometric value for an ISD of
+// 200 m is 115 m, which drew a huge outline with a lot of dead space between it
+// and the sector petals, and made adjacent cells look like they were touching.
+// Drawn at 72 m the cells read as separate objects. The site POSITIONS are still
+// the true lattice at ISD 200 m, which is what the physics uses.
+const HEX_R = 72;
 
 const wx = (x) => (x - WX0) * PPM;
 const wy = (y) => H - (y - WY0) * PPM;
@@ -197,12 +205,12 @@ export default function Radar({ state, mode, onWalk, onSplit }) {
               const a = (90 - sec.az) * Math.PI / 180;
               return (
                 <g key={sec.az}>
-                  <path d={petalPath(c.x, c.y, 46, sec.az, 48)}
+                  <path d={petalPath(c.x, c.y, 38, sec.az, 48)}
                         fill={heatFill(sec.noiseRise)}
                         stroke={over ? "#C0492F" : "#94A3B8"}
                         strokeWidth={over ? 2.2 : 0.8} strokeLinejoin="round" />
-                  <text x={wx(c.x + 24 * Math.cos(a))} y={wy(c.y + 24 * Math.sin(a)) + 4}
-                        textAnchor="middle" fontSize="11" fontWeight="700"
+                  <text x={wx(c.x + 20 * Math.cos(a))} y={wy(c.y + 20 * Math.sin(a)) + 3.5}
+                        textAnchor="middle" fontSize="10" fontWeight="700"
                         fill={over ? "#C0492F" : "#0E2A47"}>
                     {sec.noiseRise.toFixed(1)}
                   </text>
@@ -213,12 +221,12 @@ export default function Radar({ state, mode, onWalk, onSplit }) {
                      fill="#0E2A47" stroke="#fff" strokeWidth="1" />
             {/* Labels hug the site marker, not the hex edge. The hexes clip at the
                 frame now, so a label pinned to the hex would fall off screen. */}
-            <text x={sx0} y={labelAbove ? sy0 - 92 : sy0 + 88}
-                  textAnchor="middle" fontSize="12" fontWeight="700" fill="#334155">
+            <text x={sx0} y={labelAbove ? sy0 - 74 : sy0 + 72}
+                  textAnchor="middle" fontSize="11" fontWeight="700" fill="#334155">
               SITE {c.id}
             </text>
             {g && (
-              <text x={sx0} y={labelAbove ? sy0 - 78 : sy0 + 102}
+              <text x={sx0} y={labelAbove ? sy0 - 61 : sy0 + 85}
                     textAnchor="middle" fontSize="11"
                     fontWeight={g.overBudget ? "700" : "400"}
                     fill={g.overBudget ? "#C0492F" : "#94A3B8"}>
@@ -231,7 +239,7 @@ export default function Radar({ state, mode, onWalk, onSplit }) {
 
       {/* ---- our own site: three sectors, the serving one live ---- */}
       {[120, 240].map(az => (
-        <path key={az} d={petalPath(0, 0, 46, az, 48)} fill="#e2e8f0" opacity="0.7"
+        <path key={az} d={petalPath(0, 0, 44, az, 48)} fill="#e2e8f0" opacity="0.7"
               stroke="#cbd5e1" strokeWidth="0.8" strokeLinejoin="round" />
       ))}
 

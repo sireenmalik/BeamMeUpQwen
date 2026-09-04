@@ -290,11 +290,71 @@ export class ControlLoop {
     // computed because there is no UE transmit power in this simulator. See
     // neighbours.js.
     // ------------------------------------------------------------------
-    const gate = this.neighbours.evaluate(this.fanCenter, this.tilt, chosenFan, chosenTilt);
+    let gate = this.neighbours.evaluate(this.fanCenter, this.tilt, chosenFan, chosenTilt);
+
+    // --- FEASIBLE-STEP SEARCH, not a veto ---------------------------------
+    //
+    // A plain block deadlocks, and it does so silently. Measured: with the crowd
+    // 70 m off boresight the model correctly proposed 27.4 deg, the gate blocked
+    // the whole move at 3.07 dB, the beam held at 0, and on the next tick the
+    // required move was the same or larger. Fourteen ticks, zero movement, source
+    // reading "neighbour-blocked" every time. The model was steering perfectly
+    // and the gate had frozen the beam.
+    //
+    // So the question the gate asks changes from "is this move allowed" to
+    // "what is the largest part of this move that is allowed". It walks scaled
+    // fractions of the model's proposal toward the current position and takes the
+    // biggest one that fits the budget.
+    //
+    // WHAT THIS IS NOT: the tool does not invent a direction or a target. Every
+    // candidate is a fraction of the MODEL's own proposal, interpolated back
+    // toward where the beam already is. The model still decides where to point;
+    // the gate only decides how far it may go this tick. If nothing fits, the
+    // beam holds — it never falls back to an aim of the tool's own making.
+    // ----------------------------------------------------------------------
+    // Binary search for the largest allowed fraction, rather than a fixed ladder.
+    //
+    // A ladder with a smallest rung deadlocks whenever even that rung is over
+    // budget. Measured with the crowd 29 deg off boresight: the smallest rung was
+    // 7 percent, which is a 2 deg move, which costs 1.35 dB against a 1.0 dB
+    // budget. Blocked. The beam froze again, just less obviously than before.
+    //
+    // Bisection has no smallest rung. It converges on whatever the budget does
+    // allow, even if that is a fraction of a degree, so the beam always creeps
+    // rather than stopping dead.
+    if (!gate.allowed && Number.isFinite(modelFan)) {
+      const fromFan = this.fanCenter, fromTilt = this.tilt;
+      const at = (f) => this.neighbours.evaluate(
+        fromFan, fromTilt,
+        fromFan  + (chosenFan  - fromFan)  * f,
+        fromTilt + (chosenTilt - fromTilt) * f);
+
+      let lo = 0, hi = 1, best = null;
+      for (let i = 0; i < 8; i++) {
+        const mid = (lo + hi) / 2;
+        const g2 = at(mid);
+        if (g2.allowed) { best = { f: mid, g: g2 }; lo = mid; } else { hi = mid; }
+      }
+
+      if (best && best.f > 0.004) {
+        const tryFan  = fromFan  + (chosenFan  - fromFan)  * best.f;
+        const tryTilt = fromTilt + (chosenTilt - fromTilt) * best.f;
+        dec.notes.push(
+          `full move to ${chosenFan.toFixed(1)}\u00b0 costs ` +
+          `${gate.worstDelta.toFixed(2)}dB at ${gate.worstCell}, budget ` +
+          `${gate.budget}dB. Took ${Math.round(best.f*100)}% ` +
+          `to ${tryFan.toFixed(1)}\u00b0`);
+        chosenFan  = tryFan;
+        chosenTilt = tryTilt;
+        gate = best.g;
+        dec.source = "neighbour-limited";
+      }
+    }
+
     dec.neighbours = gate;
 
     if (!gate.allowed) {
-      chosenFan  = this.fanCenter;              // hold
+      chosenFan  = this.fanCenter;              // nothing fits: hold
       chosenTilt = this.tilt;
       dec.source = "neighbour-blocked";
       dec.notes.push(`blocked: ${gate.reason}`);
@@ -416,6 +476,8 @@ export class ControlLoop {
     const modelReason = String(params.reason || "").trim();
     if (this.decision.source === "neighbour-blocked") {
       reasonText = `[gate] ${this.decision.neighbours.reason}, holding position`;
+    } else if (this.decision.source === "neighbour-limited") {
+      reasonText = `[gate] ${this.decision.notes[this.decision.notes.length-1]}`;
     } else if (this.decision.source === "no-decision") {
       reasonText = "[tool] no usable model output, holding position";
     } else if (modelReason) {
