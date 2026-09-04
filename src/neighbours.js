@@ -127,10 +127,39 @@ export const BLOCK_STREAK_LIMIT = Number(process.env.BLOCK_STREAK ?? 3);
 // A hex lattice puts neighbouring sites at ISD on 60 degree bearings. The earlier
 // placement (B and C at 45 deg, D at 260 m) was not a lattice position at all.
 // Our serving sector faces north, so these are the three sites it can reach.
+// ISD 400 m. Chosen by measurement, not by picking a standard scenario.
+//
+// The crowd is allowed out to 200 m, matching gen_v9.py. The handover boundary
+// sits near ISD/2, so 400 m puts it at exactly 200 m: the whole trained range is
+// legitimately inside our own cell, and a crowd at the far edge is right at the
+// point where it would hand over.
+//
+// The interference numbers were the other half of the choice. Worst-case noise
+// rise at a neighbour, main lobe pointed straight at it:
+//     ISD 200 m -> 11.9 dB   boundary 100 m   crowd stands on their tower
+//     ISD 300 m ->  6.6 dB   boundary 150 m
+//     ISD 400 m ->  3.6 dB   boundary 200 m   <- matches the trained range
+//     ISD 500 m ->  2.0 dB   boundary 250 m   gate never fires, no demo left
+//
+// At 500 m every move costs under half a decibel and the gate has nothing to do.
+// At 200 m the geometry is wrong. 400 m is where both work.
+//
+// The crowd is allowed out to 200 m, matching what the training data covers. At an
+// ISD of 200 m the handover boundary sits around 100 m, so a crowd at 200 m would
+// be standing on a neighbour's tower and would in reality have handed over long
+// ago. At 500 m the boundary is 250 m, so the whole training range is legitimately
+// inside our own cell.
+//
+// It also calms the interference numbers: 2.5x the distance at 35 dB per decade of
+// NLOS path loss is about 14 dB less spill.
+//
+// NOTE: the DRAWING compresses this. Radar.jsx places the sites at a fixed screen
+// radius so the layout stays readable, and labels the link "ISD 500 m (compressed)".
+// The physics here uses the true 500 m. Do not read screen distance as real distance.
 const SITES = [
-  { id: "B", az:  60, dist: 200 },
-  { id: "C", az: -60, dist: 200 },
-  { id: "D", az:   0, dist: 200 },
+  { id: "B", az:  60, dist: 400 },
+  { id: "C", az: -60, dist: 400 },
+  { id: "D", az:   0, dist: 400 },
 ];
 
 // Every site is tri-sectored on the same orientation, which is how a real

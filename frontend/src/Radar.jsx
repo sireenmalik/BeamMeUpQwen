@@ -9,7 +9,7 @@ import React, { useRef } from "react";
 // toward a neighbour, only read it off a number somewhere else.
 //
 // So the canvas now covers the whole hex lattice: our serving sector, the beam,
-// the crowd, and the three neighbouring sites at ISD 200 m, all in metres, all in
+// the crowd, and the three neighbouring sites, all in metres, all in
 // one frame. The neighbour numbers move when the beam moves because they are the
 // same scene.
 //
@@ -31,17 +31,30 @@ import React, { useRef } from "react";
 // Cropped tight around the serving sector. The anchor is the show; the
 // neighbours are context at the edges. Our 150 m sector now fills about half the
 // canvas height instead of a third.
-const WX0 = -280, WX1 = 280, WY0 = -55, WY1 = 265;
+// Widened because the serving sector now reaches 200 m. The neighbour sites are
+// drawn beyond that, so the frame has to hold 200 m of sector plus the drawn
+// neighbour radius plus their petals and labels. Aspect kept near 1.75 to match
+// the panel, so nothing letterboxes.
+const WX0 = -346, WX1 = 346, WY0 = -55, WY1 = 340;
 const PPM = 1.5;                                   // pixels per metre
 const W = (WX1 - WX0) * PPM, H = (WY1 - WY0) * PPM;
 const TOWER_H = 25;                                // matches backend geometry
-const RANGE_MAX = 150;                             // our own sector's drawn reach
-const ISD = 200;
+// Our sector reaches 200 m, matching what gen_v9.py trained on (30-200 m). It used
+// to be 150 here and 140 in crowd.js, while training went to 238 m, so a third of
+// every training run covered distances the crowd could never reach.
+const RANGE_MAX = 200;
+// TRUE inter-site distance, used by the physics in neighbours.js.
+const ISD = 400;
+// DRAWN inter-site distance. Sites are placed at a fixed screen radius instead of
+// their true 500 m, because drawing to scale would shrink the serving sector to a
+// quarter of the canvas and this picture is about that sector. Bearings are true;
+// only the radius is compressed, and the ISD line says so.
+const ISD_DRAWN = 265;
 // Hex radius is a DRAWING choice, not physics. The geometric value for an ISD of
 // 200 m is 115 m, which drew a huge outline with a lot of dead space between it
 // and the sector petals, and made adjacent cells look like they were touching.
 // Drawn at 72 m the cells read as separate objects. The site POSITIONS are still
-// the true lattice at ISD 200 m, which is what the physics uses.
+// the true lattice, which is what the physics uses.
 const HEX_R = 72;
 
 const wx = (x) => (x - WX0) * PPM;
@@ -205,7 +218,10 @@ export default function Radar({ state, mode, onWalk, onSplit }) {
     }
   }
 
-  const rings = [50, 100, 150].map(r => {
+  // Rings must reach RANGE_MAX or the outermost label contradicts the sector edge.
+  // They were hardcoded at 150 while the edge lines used RANGE_MAX, so raising the
+  // range to 200 left the picture saying 150.
+  const rings = [50, 100, 150, 200].map(r => {
     const p = polarToScreen(0, r), rpx = r * PPM;
     const l = polarToScreen(-55, r), rr = polarToScreen(55, r);
     return <g key={r}>
@@ -235,7 +251,7 @@ export default function Radar({ state, mode, onWalk, onSplit }) {
       {/* ---- hex lattice ---- */}
       <polygon points={hexPoints(0, 0)} fill="none" stroke="#e2e8f0" strokeWidth="1.2" />
       {neighbours.map(c => (
-        <polygon key={`hex${c.id}`} points={hexPoints(c.x, c.y)} fill="none"
+        <polygon key={`hex${c.id}`} points={hexPoints(ISD_DRAWN*Math.sin(Math.atan2(c.x,c.y)), ISD_DRAWN*Math.cos(Math.atan2(c.x,c.y)))} fill="none"
                  stroke={gate?.cells?.find(g => g.id === c.id)?.overBudget ? "#C0492F" : "#e2e8f0"}
                  strokeWidth={gate?.cells?.find(g => g.id === c.id)?.overBudget ? 2.2 : 1.2} />
       ))}
@@ -292,7 +308,11 @@ export default function Radar({ state, mode, onWalk, onSplit }) {
       {/* ---- neighbour sites: three petals each, heat filled ---- */}
       {neighbours.map(c => {
         const g = gate?.cells?.find(x => x.id === c.id);
-        const sx0 = wx(c.x), sy0 = wy(c.y);
+        // Compress the radius, keep the bearing. c.x/c.y are the TRUE positions at
+        // 500 m; dx/dy below are where they are drawn.
+        const br = Math.atan2(c.x, c.y);
+        const dx = ISD_DRAWN * Math.sin(br), dy = ISD_DRAWN * Math.cos(br);
+        const sx0 = wx(dx), sy0 = wy(dy);
         const labelAbove = c.y > 120;   // the site straight ahead      // the site straight ahead: label above it,
                                            // because below it is where our beam is drawn
         return (
@@ -303,11 +323,11 @@ export default function Radar({ state, mode, onWalk, onSplit }) {
               const a = (90 - sec.az) * Math.PI / 180;
               return (
                 <g key={sec.az}>
-                  <path d={petalPath(c.x, c.y, 38, sec.az, 48)}
+                  <path d={petalPath(dx, dy, 38, sec.az, 48)}
                         fill={heatFill(sec.noiseRise)}
                         stroke={over ? "#C0492F" : "#94A3B8"}
                         strokeWidth={over ? 2.2 : 0.8} strokeLinejoin="round" />
-                  <text x={wx(c.x + 20 * Math.cos(a))} y={wy(c.y + 20 * Math.sin(a)) + 3.5}
+                  <text x={wx(dx + 20 * Math.cos(a))} y={wy(dy + 20 * Math.sin(a)) + 3.5}
                         textAnchor="middle" fontSize="10" fontWeight="700"
                         fill={over ? "#C0492F" : "#0E2A47"}>
                     {sec.noiseRise.toFixed(1)}
@@ -320,7 +340,7 @@ export default function Radar({ state, mode, onWalk, onSplit }) {
                 rather than as the scene changing. Tinted by which sector serves
                 them, so the split the numbers are computed over is visible. */}
             {(c.ues || []).map((u, i) => (
-              <circle key={`u${c.id}${i}`} cx={wx(u.x)} cy={wy(u.y)} r="1.8"
+              <circle key={`u${c.id}${i}`} cx={wx(dx + (u.x - c.x))} cy={wy(dy + (u.y - c.y))} r="1.8"
                       fill={u.sector === 0 ? "#64748B" : u.sector === 120 ? "#94A3B8" : "#334155"}
                       opacity="0.7" />
             ))}
@@ -402,6 +422,22 @@ export default function Radar({ state, mode, onWalk, onSplit }) {
           <circle cx={p.sx} cy={p.sy} r="8" fill="none" stroke="#E08A1E" strokeWidth="2" />
           <line x1={p.sx-11} y1={p.sy} x2={p.sx+11} y2={p.sy} stroke="#E08A1E" strokeWidth="1.5" />
           <line x1={p.sx} y1={p.sy-11} x2={p.sx} y2={p.sy+11} stroke="#E08A1E" strokeWidth="1.5" />
+        </g>;
+      })()}
+
+      {/* ISD reference. The line is drawn short because the layout is compressed,
+           so the label carries the real number. Nobody should measure the picture. */}
+      {(() => {
+        const br = 60 * Math.PI / 180;
+        const ex = wx(ISD_DRAWN * Math.sin(br)), ey = wy(ISD_DRAWN * Math.cos(br));
+        const mx = (CX + ex) / 2, my = (CY + ey) / 2;
+        return <g>
+          <line x1={CX} y1={CY} x2={ex} y2={ey}
+                stroke="#94A3B8" strokeWidth="0.9" strokeDasharray="4 4" opacity="0.8" />
+          <text x={mx + 8} y={my - 5} fontSize="9" fill="#94A3B8"
+                transform={`rotate(-30 ${mx + 8} ${my - 5})`}>
+            ISD {ISD} m · drawn compressed
+          </text>
         </g>;
       })()}
 

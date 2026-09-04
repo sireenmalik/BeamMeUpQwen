@@ -1,10 +1,43 @@
 // crowd.js — the simulator's private world. Owns UE positions and moves them.
 // Three drivers: manual drag (UI sets a target), walk-to-point (UI drops a dot),
 // auto-drift (gentle wander), and chaos (radial dispersal from a burst point).
+//
+// ============================================================================
+// RANGE LIMITS MUST MATCH gen_v9.py.
+//
+// The clamp below used to stop the crowd at 140 m while gen_v9.py generated
+// training examples out to 200 m, and the tilt labels implied ranges to 238 m.
+// Measured against the real training file: 33 percent of every example covered a
+// distance the crowd could not reach, and in Auto Drift, which held the crowd
+// between 42 and 110 m, it was 59 percent.
+//
+// The model was being taught about a world the simulator could not produce. It
+// did not throw and nothing warned about it — the same silent class of failure as
+// the prompt mismatch.
+//
+// So the clamp is now 200 m, matching gen_v9.py's crowd_r = uniform(30, 200), and
+// Auto Drift roams to 170. Three numbers have to agree and nothing enforces it:
+//
+//     crowd.js  _clampSector  200 m      <- here
+//     Radar.jsx RANGE_MAX     200 m
+//     gen_v9.py crowd_r       30 to 200 m
+//
+// Change one, change all three, or a third of the next training run is wasted
+// again.
+// ============================================================================
 
 import { fromPolar, toPolar } from "./geometry.js";
 
 const N_UES = 60;
+
+// Matches gen_v9.py crowd_r = rng.uniform(30.0, 200.0).
+const RANGE_MIN_M = 12;
+const RANGE_MAX_M = 200;
+// Auto Drift steers the crowd back inside this band, so it wanders without
+// pinning itself to the sector edge. Widened from 42-110 so the drift actually
+// visits the far half of the trained range instead of only the middle.
+const DRIFT_MIN_M = 40;
+const DRIFT_MAX_M = 170;
 
 function gaussian(mean, sd) {
   let u = 0, v = 0;
@@ -92,8 +125,8 @@ export class Crowd {
       // if we hit a sector boundary, steer the heading back toward the sector center
       // (mid-range, boresight) and commit to a fresh hold, so it doesn't stutter at the edge
       const tp = toPolar(this.target.x, this.target.y);
-      if (tp.az < -42 || tp.az > 42 || tp.range < 42 || tp.range > 110) {
-        const center = fromPolar(0, 70);               // sector middle
+      if (tp.az < -42 || tp.az > 42 || tp.range < DRIFT_MIN_M || tp.range > DRIFT_MAX_M) {
+        const center = fromPolar(0, 100);              // sector middle of the wider band
         this.driftHeading = Math.atan2(center.x - this.target.x, center.y - this.target.y)
                             + gaussian(0, 0.4);         // head back to center, slight randomness
         const tickMs2 = Number(process.env.TICK_MS || 2000);
@@ -123,7 +156,7 @@ export class Crowd {
     const clampOne = (o) => {
       let { az, range } = toPolar(o.x, o.y);
       az = Math.max(-54, Math.min(54, az));
-      range = Math.max(12, Math.min(140, range));
+      range = Math.max(RANGE_MIN_M, Math.min(RANGE_MAX_M, range));
       const p = fromPolar(az, range); o.x = p.x; o.y = p.y;
     };
     if (pt) { clampOne(pt); return; }
