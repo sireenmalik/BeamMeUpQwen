@@ -1,122 +1,88 @@
-// model.js — pluggable rApp brain. Emits PARAMETERS ONLY (fan_center, tilt, action, reason).
+// model.js — the rApp brain. Emits PARAMETERS ONLY (fan_center, tilt, action, reason).
 // The formatter tool turns those into JSON. Endpoint chosen by env:
 //
-//   MODEL_PROVIDER = anthropic | openai | none   (default: none -> deterministic)
+//   MODEL_PROVIDER = anthropic | openai      (no "none" — see below)
 //   MODEL_ENDPOINT = base url for the local OpenAI-compatible server (serve.py / Ollama)
 //   MODEL_NAME     = model id
 //   MODEL_API_KEY  = key (anthropic or openai-compatible)
 //
-// "none" runs a deterministic forecaster so the demo works with zero credentials.
-// The LLM path is the same contract — it just replaces the math with a model call.
+// ============================================================================
+// THERE IS NO DETERMINISTIC FALLBACK. THE MODEL DECIDES OR THE BEAM HOLDS.
+//
+// A deterministic forecaster used to run whenever the model call failed or no
+// provider was configured, and its numbers flowed through as if the model had
+// produced them. `dec.source` still read "model" and nothing on screen said the
+// tool had answered. That is a silent substitution and it is removed.
+//
+// If the model cannot be reached or returns nothing usable, decide() returns
+// fan_center: NaN and tilt: NaN. loop.js sees that and HOLDS the previous beam
+// position. The arithmetic never steers.
+//
+// The arithmetic still exists — in reference.js — but it is read-only. It records
+// what it would have said so the delta can train the next adapter. It cannot
+// return a value that reaches the beam.
+// ============================================================================
 
-const PROVIDER = (process.env.MODEL_PROVIDER || "none").toLowerCase();
+const PROVIDER = (process.env.MODEL_PROVIDER || "openai").toLowerCase();
 
 // ---------------------------------------------------------------------------
-// PROMPT SCHEMAS
+// PROMPT SCHEMA
 //
-// Each trained adapter expects the exact prompt shape it was trained on. Getting this
-// wrong does not throw - the model simply produces a memorised value and the beam looks
-// broken in a way that is hard to attribute. That happened repeatedly, so the schema is
-// selected explicitly and pinned to the adapter rather than left implicit.
+// v9 only. Schemas v7 and v8 are removed: they had the harness compute tilt from
+// the arithmetic, which is exactly the path we no longer want in the runtime.
 //
-//   PROMPT_SCHEMA=v7   fan_center only. Tilt computed in the harness.
-//   PROMPT_SCHEMA=v8   fan_center only. Same contract as v7, pairs with beam-v8.
-//   PROMPT_SCHEMA=v9   fan_center AND tilt from the model.
+// The adapter expects the exact prompt shape it was trained on. Getting this wrong
+// does not throw — the model simply produces a memorised value and the beam looks
+// broken in a way that is hard to attribute. That happened repeatedly.
 //
-// Set it alongside MODEL_NAME so the pair is obvious:
-//     MODEL_NAME=beam-v8   PROMPT_SCHEMA=v8
 //     MODEL_NAME=beam-v9   PROMPT_SCHEMA=v9
 //
-// Getting this wrong does not throw. The model simply produces a memorised value and the
-// beam looks broken in a way that is hard to attribute, so the schema is pinned to the
-// adapter explicitly rather than left implicit.
+// NOTE ON "uplink beams" IN THE SYSTEM PROMPT.
+// It is technically wrong — this is the downlink beam, rsrp = P_tx - pathloss +
+// beamGain, the gNodeB transmits and the UE receives. The string stays because
+// beam-v9 was trained with it, and changing it here alone is a train/inference
+// mismatch. Fix this file and gen_v9.py TOGETHER at the next retrain, never one.
 // ---------------------------------------------------------------------------
-const PROMPT_SCHEMA = (process.env.PROMPT_SCHEMA || "v8").toLowerCase();
+const PROMPT_SCHEMA = (process.env.PROMPT_SCHEMA || "v9").toLowerCase();
+if (PROMPT_SCHEMA !== "v9") {
+  throw new Error(
+    `PROMPT_SCHEMA="${PROMPT_SCHEMA}" is not supported. v7 and v8 were removed ` +
+    `because they let the harness compute tilt. Set PROMPT_SCHEMA=v9.`
+  );
+}
 
 // Format numbers EXACTLY as Python's json.dumps does in the generator, because the
 // adapter was trained on that byte sequence. JavaScript's JSON.stringify writes
-// "[-42,-33]" while Python writes "[-45, -33]" - different tokens, and the model has
+// "[-42,-33]" while Python writes "[-45, -33]" — different tokens, and the model has
 // never seen the former. Python also renders floats as "15.0" where JS renders "15".
 // Both differences matter to a 0.5B model.
 function fmtInts(a)  { return "[" + a.map(v => String(Math.round(v))).join(", ") + "]"; }
 function fmtOneDp(a) { return "[" + a.map(v => v.toFixed(1)).join(", ") + "]"; }
 
-const SCHEMAS = {
-  // -------------------------------------------------------------- v7
-  // Byte-identical to gen_v7.py. current_fan_center is deliberately absent: the weighted
-  // centroid is fully determined by the RSRP profile and the beam azimuths, so supplying
-  // the current beam position only gave the model a scalar to copy - and it did. tilt is
-  // absent too; it is atan(h/range), with exactly one right answer for a given range.
-  v7: {
-    system:
-      "You are a Non-RT RIC rApp steering a grid of uplink beams toward the load in a cell. " +
-      "You are given SS-RSRP per SSB beam in dBm and the azimuth each beam points at. " +
-      "Return ONLY one JSON object with keys: fan_center (-49..49), action " +
-      "(follow|widen|allocate), reason (short). No prose, no thinking, JSON only.",
-    user: (obs) =>
-      `ssb_rsrp_dBm=${fmtInts(obs.ssbRsrp)} (beam azimuths ${fmtOneDp(obs.beamAzimuths)} deg)`,
-    // the harness computes tilt; whatever the model returns for it is ignored
-    usesModelTilt: false,
-  },
+const SYSTEM_PROMPT =
+  "You are a Non-RT RIC rApp steering a grid of uplink beams toward the load in a cell. " +
+  "You are given SS-RSRP per SSB beam in dBm and the azimuth each beam points at. " +
+  "Return ONLY one JSON object with keys: fan_center (-49..49), tilt (3..45), action " +
+  "(follow|widen|allocate), reason (short). No prose, no thinking, JSON only.";
 
-  // -------------------------------------------------------------- v8
-  // Identical contract to v7. It exists so MODEL_NAME=beam-v8 pairs with
-  // PROMPT_SCHEMA=v8 and nobody has to translate between the two.
-  v8: {
-    system: null,   // copied from v7 below
-    user: null,
-    usesModelTilt: false,
-  },
-
-  // -------------------------------------------------------------- v8
-  // Adds tilt. current_tilt stays OUT for the same reason current_fan_center did: given
-  // it, the model echoed it back and the beam kept the wrong range while the crowd walked
-  // away. Range must be inferable from the profile, so the generator has to vary crowd
-  // distance widely or "always say 14" wins.
-  v9: {
-    system:
-      "You are a Non-RT RIC rApp steering a grid of uplink beams toward the load in a cell. " +
-      "You are given SS-RSRP per SSB beam in dBm and the azimuth each beam points at. " +
-      "Return ONLY one JSON object with keys: fan_center (-49..49), tilt (3..45), action " +
-      "(follow|widen|allocate), reason (short). No prose, no thinking, JSON only.",
-    user: (obs) =>
-      `ssb_rsrp_dBm=${fmtInts(obs.ssbRsrp)} (beam azimuths ${fmtOneDp(obs.beamAzimuths)} deg)`,
-    usesModelTilt: true,
-  },
-};
-
-SCHEMAS.v8.system = SCHEMAS.v7.system;   // v8 is a copy of v7
-SCHEMAS.v8.user   = SCHEMAS.v7.user;
-
-const SCHEMA = SCHEMAS[PROMPT_SCHEMA] || SCHEMAS.v8;
-if (!SCHEMAS[PROMPT_SCHEMA]) {
-  console.warn(`PROMPT_SCHEMA="${PROMPT_SCHEMA}" is unknown, falling back to v8`);
-}
-export const USES_MODEL_TILT = SCHEMA.usesModelTilt;
-
-const SYSTEM_PROMPT = SCHEMA.system;
-function buildUser(obs) { return SCHEMA.user(obs); }
-
-// Kept for callers that want one string.
-function buildPrompt(obs) {
-  return SYSTEM_PROMPT + "\n\n" + buildUser(obs);
+function buildUser(obs) {
+  return `ssb_rsrp_dBm=${fmtInts(obs.ssbRsrp)} (beam azimuths ${fmtOneDp(obs.beamAzimuths)} deg)`;
 }
 
-// ---- deterministic fallback (also the "no model" path) ----
-function deterministic(obs) {
-  // REACTIVE: aim AT the crowd's centroid now. No lead, no projection.
-  // The forecasting mode decides whether to look ahead; the deterministic path must not
-  // add its own hidden lead on top, or "reactive" quietly becomes "lead".
-  const base = (obs.rsrpWeightedAz != null) ? obs.rsrpWeightedAz : obs.centroidAz;
-  let fan = base;
-  let action = "follow";
-  if (obs.spreadRising && Math.abs(obs.centroidVel) < 0.6) { action = "widen"; fan = base; }
-  else if (obs.splitDetected) { action = "allocate"; }
-  const tilt = obs.currentTilt;
-  return { fan_center: +fan.toFixed(2), tilt, action, reason:
-    action === "widen" ? "radial dispersal, widen coverage"
-    : action === "allocate" ? "load split, share beams"
-    : "lead ahead of crowd" };
+// The model owns tilt under v9. Kept as a named export because loop.js imports it;
+// it is now always true.
+export const USES_MODEL_TILT = true;
+
+// The value returned when there is no usable decision. loop.js checks
+// Number.isFinite() on these and holds the previous beam position.
+//
+// MUST be a factory, not a shared constant. loop.js writes the committed values back
+// onto the params object it receives (params.fan_center = ...), so a shared object
+// would be mutated on the first hold and every subsequent tick would then see finite
+// numbers and commit them as if the model had produced them. That is exactly the
+// silent substitution this change removes, reintroduced by aliasing.
+function noDecision() {
+  return { fan_center: NaN, tilt: NaN, action: "hold", reason: "" };
 }
 
 async function callAnthropic(obs) {
@@ -125,7 +91,7 @@ async function callAnthropic(obs) {
     max_tokens: 200,
     temperature: 0,
     messages: [{ role: "system", content: SYSTEM_PROMPT },
-                { role: "user", content: buildUser(obs) }]
+               { role: "user", content: buildUser(obs) }]
   };
   const r = await fetch("https://api.anthropic.com/v1/messages", {
     method: "POST",
@@ -136,13 +102,18 @@ async function callAnthropic(obs) {
     },
     body: JSON.stringify(body)
   });
+  if (!r.ok) {
+    console.error("CALL-FAIL:", r.status, (await r.text()).slice(0, 200));
+    return noDecision();
+  }
   const data = await r.json();
   const text = (data.content || []).map(c => c.text || "").join("");
-  return parseParams(text, obs);
+  return parseParams(text);
 }
 
 async function callOpenAICompatible(obs) {
-  // local Qwen 2.5 + LoRA adapter served by serve.py (or Ollama) on an OpenAI-compatible endpoint
+  // local Qwen 2.5 + LoRA adapter served by serve.py (or Ollama) on an
+  // OpenAI-compatible endpoint
   const base = process.env.MODEL_ENDPOINT || "http://localhost:8000/v1";
   const r = await fetch(`${base}/chat/completions`, {
     method: "POST",
@@ -151,7 +122,7 @@ async function callOpenAICompatible(obs) {
       ...(process.env.MODEL_API_KEY ? { authorization: `Bearer ${process.env.MODEL_API_KEY}` } : {})
     },
     body: JSON.stringify({
-      model: process.env.MODEL_NAME || "qwen2.5:1.5b",
+      model: process.env.MODEL_NAME || "beam-v9",
       temperature: 0,
       max_tokens: 80,
       messages: [{ role: "system", content: SYSTEM_PROMPT },
@@ -162,11 +133,11 @@ async function callOpenAICompatible(obs) {
   if (!r.ok) {
     const errText = await r.text();
     console.error("CALL-FAIL:", r.status, errText.slice(0, 200));
-    return deterministic(obs);
+    return noDecision();                     // hold. do NOT substitute arithmetic.
   }
   const data = await r.json();
   const text = data.choices?.[0]?.message?.content || "";
-  return parseParams(text, obs);
+  return parseParams(text);
 }
 
 // Salvage the numbers even when the generation is truncated.
@@ -209,7 +180,7 @@ function dedupe(str) {
   return parts.join(" ").trim().slice(0, 70);
 }
 
-function parseParams(text, obs) {
+function parseParams(text) {
   const raw = text || "";
   // 1. clean parse
   try {
@@ -237,20 +208,23 @@ function parseParams(text, obs) {
 
   // 3. genuinely unusable -> let the loop hold position
   console.error("PARSE-FAIL: no usable numbers | raw:", raw.slice(0, 150));
-  return { fan_center: NaN, tilt: NaN, action: "hold", reason: "" };
+  return noDecision();
 }
 
 export async function decide(obs) {
   try {
     if (PROVIDER === "anthropic" && process.env.MODEL_API_KEY) return await callAnthropic(obs);
     if (PROVIDER === "openai") return await callOpenAICompatible(obs);
+    console.error(`DECIDE-FAIL: MODEL_PROVIDER="${PROVIDER}" is not a model provider. ` +
+                  `There is no deterministic fallback. Set MODEL_PROVIDER=openai.`);
   } catch (e) {
     console.error("DECIDE-FAIL:", e.message);
   }
-  return deterministic(obs);
+  return noDecision();                       // hold. never the arithmetic.
 }
 
 export const MODEL_INFO = {
   provider: PROVIDER,
-  name: process.env.MODEL_NAME || (PROVIDER === "none" ? "deterministic" : "unset")
+  name: process.env.MODEL_NAME || "unset",
+  schema: PROMPT_SCHEMA
 };

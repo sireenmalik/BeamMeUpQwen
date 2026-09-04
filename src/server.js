@@ -51,8 +51,12 @@ app.post("/api/auto", (_req, res) => { loop.crowd.setAuto(); running = true; res
 app.post("/api/idle", (_req, res) => { loop.crowd.setIdle(); res.json({ ok: true, running }); });
 app.post("/api/chaos", (_req, res) => { loop.crowd.triggerChaos(); running = true; res.json({ ok: true, running }); });
 app.post("/api/escalation/clear", (_req, res) => { loop.clearEscalation(); res.json({ ok: true }); });
-// forecasting mode: reactive | lead | momentum | predictive (predictive is WIP -> behaves as lead)
-app.post("/api/mode", (req, res) => { const m = loop.setMode(req.body?.mode); res.json({ ok: true, mode: m }); });
+
+// NOTE: POST /api/mode was removed along with the forecast selector. It called
+// loop.setMode(), which no longer exists. The mode changed dec.referenceAim only —
+// display, never committed — so switching it produced an identical beam. Restoring
+// forecast behaviour means new training labels and a new adapter, not an endpoint.
+
 // arm/disarm the read-only chaos detector (armed only while Detect Chaos use case is active)
 app.post("/api/anomaly/arm", (req, res) => { const on = loop.setAnomalyArmed(req.body?.on); res.json({ ok: true, armed: on }); });
 // explicit run control: a mode turns the loop ON; turning the mode off STOPS it
@@ -65,4 +69,13 @@ app.use(express.static(dist));
 app.get("*", (_req, res) => res.sendFile(path.join(dist, "index.html")));
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`crowd-rapp on :${PORT}  tick=${TICK_MS}ms  provider=${process.env.MODEL_PROVIDER||"none"}`));
+app.listen(PORT, () => {
+  const provider = process.env.MODEL_PROVIDER || "openai";
+  console.log(`crowd-rapp on :${PORT}  tick=${TICK_MS}ms  provider=${provider}  schema=${process.env.PROMPT_SCHEMA || "v9"}`);
+  // There is no deterministic fallback any more. If the model endpoint is not
+  // reachable the beam holds its position and every proposal reads "no decision".
+  if (provider !== "openai" && provider !== "anthropic") {
+    console.warn(`WARNING: MODEL_PROVIDER="${provider}" is not a model provider. ` +
+                 `The beam will HOLD on every tick. Set MODEL_PROVIDER=openai.`);
+  }
+});

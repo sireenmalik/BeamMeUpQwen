@@ -12,18 +12,20 @@ const api = (path, body) => {
 
 const MODES = [
   { key: "auto",   label: "Auto Drift",   hint: "Crowd wanders randomly. Beam follows.",        color: "teal" },
-  { key: "linear", label: "Crowd Linear", hint: "Click the field. Crowd walks there, beam leads.", color: "teal" },
+  { key: "linear", label: "Crowd Linear", hint: "Click the field. Crowd walks there, beam follows.", color: "teal" },
   { key: "chaos",  label: "Detect Chaos", hint: "Fire the burst. Detector flags radial dispersal. Beam keeps tracking.", color: "teal" },
 ];
 
-// forecasting modes for the beam: same tuned model, deterministic tool changes.
-// predictive is the L3 tuned model — WIP, disabled and not selectable.
-const FORECAST = [
-  { key: "reactive", label: "Reactive", hint: "Aims at the crowd now. Baseline follower." },
-  { key: "lead",     label: "Lead",     hint: "Aims ahead of the crowd on steady motion." },
-  { key: "momentum", label: "Momentum", hint: "Momentum-smoothed lead. Steadier under motion." },
-  { key: "predictive", label: "Predictive", hint: "Learned forecast (L3 model). Work in progress.", wip: true, disabled: true },
-];
+// NOTE: the Reactive / Lead / Momentum / Predictive selector was removed.
+//
+// Under PROMPT_SCHEMA=v9 those buttons changed a label and nothing else. The mode fed
+// _aimForMode() in loop.js, whose output went to dec.referenceAim — display only, never
+// committed. Switching modes produced an identical beam. The selector also implied a
+// capability that did not exist.
+//
+// If forecast modes come back they have to change the TRAINING LABELS (Lead means labels
+// generated with forward projection), which is a new dataset and a new adapter, not a
+// button. See gen_v9.py.
 
 function ModeButton({ label, on, color, onClick, disabled }) {
   const onCls = color === "red" ? "bg-red-600 text-white border-red-600" : "bg-teal-600 text-white border-teal-600";
@@ -59,14 +61,11 @@ function KVPanel({ title, rows, tone }) {
 export default function App() {
   const [state, setState] = useState(null);
   const [active, setActive] = useState(null); // 'auto' | 'linear' | 'chaos' | null
-  const [forecast, setForecast] = useState("momentum");
   const activeRef = useRef(null);
   activeRef.current = active;
 
   const refresh = useCallback(async () => { try { setState(await api("/api/state")); } catch {} }, []);
   useEffect(() => { refresh(); const id = setInterval(refresh, 500); return () => clearInterval(id); }, [refresh]);
-  // set the default forecasting mode (momentum) on the backend once at load
-  useEffect(() => { api("/api/mode", { mode: "momentum" }); }, []);
 
   // ---- proposals scroll: pin to bottom unless the user has scrolled up ----
   const scrollRef = useRef(null);
@@ -102,12 +101,6 @@ export default function App() {
     }
   };
 
-  const selectForecast = (key) => {
-    if (FORECAST.find(f => f.key === key)?.disabled) return; // predictive WIP is not selectable
-    setForecast(key);
-    api("/api/mode", { mode: key });
-  };
-
   const log = state?.log;
 
   // pop sound mimicking a firecracker/gunshot for the chaos trigger
@@ -133,7 +126,6 @@ export default function App() {
   const r1 = log?.SMO_to_rApp_R1;
   const proposals = state?.proposals || [];
   const activeHint = MODES.find(m => m.key === active)?.hint || "Pick a mode to start tracking.";
-  const forecastHint = FORECAST.find(f => f.key === forecast)?.hint || "";
 
   // auto-scroll to newest ONLY when a genuinely new tick arrives AND the user is pinned to bottom.
   // (the 500ms poll re-sends the same list; keying off the newest tick stops per-poll jitter.)
@@ -206,7 +198,7 @@ export default function App() {
           <span className={`inline-block px-2 py-0.5 rounded-full text-[10px] font-semibold mr-2 ${state?.running ? "bg-teal-100 text-teal-700" : "bg-slate-200 text-slate-500"}`}>
             {state?.running ? "● TRACKING" : "○ STOPPED"}
           </span>
-         <span className="text-teal-700 font-mono">{model?.name || "qwen2.5-0.5b"}</span>
+         <span className="text-teal-700 font-mono">{model?.name || "unset"}</span>
          <span className="ml-1.5 px-1.5 py-0.5 rounded bg-teal-600 text-white text-[10px] font-semibold tracking-wide">LoRA TUNED</span>
          <span className="text-slate-500"> · tick {state?.tick ?? "—"}</span>
          </div>
@@ -218,31 +210,18 @@ export default function App() {
          )}
       </header>
 
-      {/* single compact control row: use-case modes + forecast switch */}
+      {/* single compact control row: use-case modes */}
       <div className="flex items-center gap-2 px-4 py-1.5 border-b border-slate-200 shrink-0 flex-wrap">
         {MODES.map(m => (
           <ModeButton key={m.key} label={m.label} color={m.color} disabled={m.disabled}
             on={active === m.key} onClick={() => selectMode(m.key)} />
         ))}
         <span className="mx-1 text-slate-300">|</span>
-        <span className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">Forecast</span>
-        <div className="inline-flex rounded-md border border-slate-300 overflow-hidden">
-          {FORECAST.map((f, i) => {
-            const on = forecast === f.key;
-            const base = "px-2.5 py-1 text-xs font-medium transition-colors";
-            const sep = i > 0 ? "border-l border-slate-300" : "";
-            const cls = f.disabled
-              ? "bg-slate-100 text-slate-400 cursor-not-allowed"
-              : on ? "bg-teal-600 text-white" : "bg-white text-slate-700 hover:bg-slate-50";
-            return (
-              <button key={f.key} onClick={() => selectForecast(f.key)} disabled={f.disabled}
-                className={`${base} ${sep} ${cls}`}>
-                {f.label}{f.wip && <span className="ml-1 text-[9px] opacity-90">WIP</span>}
-              </button>
-            );
-          })}
-        </div>
-        <div className="text-[11px] text-slate-500 ml-2 truncate">{active === "chaos" ? activeHint : forecastHint}</div>
+        <span className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">Beam</span>
+        <span className="text-[11px] text-slate-600 font-mono">
+          model decides · no fallback · holds on failure
+        </span>
+        <div className="text-[11px] text-slate-500 ml-2 truncate">{activeHint}</div>
       </div>
 
       {esc?.pending && (
@@ -275,12 +254,13 @@ export default function App() {
             ["spec", "SS-RSRP TS 38.215/38.133 · RRC.ConnMean TS 28.552"],
             ["carried on", "O1 PM · VES over REST"],
           ]} />
+          {/* centroid velocity row removed: centroid_az and centroid_vel were derived from the
+              simulator's true UE positions and no longer appear in the R1 log. */}
           <KVPanel title="SMO → rApp · R1 · DME" tone="teal" rows={[
             ["RSRP-weighted az", r1 ? `${r1.rsrp_weighted_az}°` : "—"],
             ["cell UE total", r1?.cell_ue_total ?? "—"],
             ["current fan_center", r1?.current ? `${r1.current.fan_center_deg}°` : "—"],
             ["current tilt", r1?.current ? `${r1.current.tilt_deg}°` : "—"],
-            ["velocity", r1 ? `${r1.centroid_vel}°/tick` : "—"],
             ["spread", r1 ? `${r1.spread}°` : "—"],
             ["spread rising", r1 ? String(r1.spread_rising) : "—"],
           ]} />
@@ -292,18 +272,18 @@ export default function App() {
                 {proposals.map((p, i) => (
                   <div key={p.tick} className={`px-3 py-1.5 text-[11px] ${i === proposals.length - 1 ? "bg-amber-50" : ""}`}>
                     <div className="flex justify-between font-mono text-slate-500">
-                      <span>{p.t}</span><span>#{p.tick} · {p.action}{p.mode ? ` · ${p.mode}` : ""}</span>
+                      <span>{p.t}</span><span>#{p.tick} · {p.action}</span>
                     </div>
                     <div className="font-mono text-slate-800">
                       az {p.fan_center}° · tilt {p.tilt}°
                       {p.source === "model" && <span className="ml-2 text-emerald-700 not-italic">← LLM</span>}
-                      {p.source === "model-clamped" && <span className="ml-2 text-amber-700 not-italic">← LLM (clamped)</span>}
-                      {p.source === "model-partial" && <span className="ml-2 text-amber-700 not-italic">← LLM (tilt sub.)</span>}
+                      {p.source === "model-partial" && <span className="ml-2 text-amber-700 not-italic">← LLM (tilt held)</span>}
                       {p.source === "no-decision" && <span className="ml-2 text-red-600 not-italic">← no decision · held</span>}
-                      {p.source === "hold" && <span className="ml-2 text-slate-500 not-italic">← hold (UE floor)</span>}
                     </div>
+                    {/* The only thing that can still rewrite the model's number is the
+                        formatter's clamp (fan −49..49, tilt 3..45). When it fires, show it. */}
                     {p.proposedFan != null && p.proposedFan !== p.fan_center && (
-                      <div className="font-mono text-[10px] text-amber-700">LLM asked az {p.proposedFan}° · fenced to {p.fan_center}°</div>
+                      <div className="font-mono text-[10px] text-amber-700">LLM asked az {p.proposedFan}° · clamped to {p.fan_center}°</div>
                     )}
                     {p.guard && <div className="text-[10px] text-amber-700 leading-snug">⚠ {p.guard}</div>}
                     <div className="text-slate-500 italic leading-snug">{p.reason}</div>
