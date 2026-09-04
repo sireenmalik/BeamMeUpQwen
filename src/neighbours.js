@@ -74,7 +74,23 @@ function pathLossNLOS(d3d) {
 // --- radio constants --------------------------------------------------------
 export const BW_HZ      = 100e6;   // 100 MHz, n78
 export const UE_NF_DB   = 7;       // UE noise figure, 3GPP calibration table
-export const HPBW_V_DEG = 20;      // vertical half-power beamwidth
+export const HPBW_V_DEG = 20;      // vertical half-power beamwidth of OUR array beam
+
+// A SECTOR antenna is not a beam. TR 38.901 Table 7.3-1 gives the element pattern
+// as phi_3dB = theta_3dB = 65 degrees. Our own five SSB beams are narrow because
+// they are beamformed inside the sector; a neighbour's fixed 120-degree sector is
+// wide.
+//
+// Using 20 degrees for a neighbour's sector was wrong and it broke the handover
+// check outright. A UE sitting 60 degrees off a sector boresight — which is the
+// normal cell-edge position in a tri-sector layout — came out 30 dB down, the
+// front-to-back floor. Measured effect: the crowd 195 m out registered the best
+// neighbour at -93 dBm against -53 dBm serving, a 39 dB margin the wrong way, so
+// Event A3 could never fire no matter how far the crowd walked.
+//
+// At 65 degrees the same UE is 12*(60/65)^2 = 10.2 dB down, which is what a real
+// sector edge looks like.
+export const HPBW_SECTOR_DEG = 65;
 export const SLA_V_DB   = 30;      // vertical side-lobe floor, TR 38.901 Table 7.3-1
 export const A_MAX_DB   = 30;      // combined attenuation cap, TR 38.901 Table 7.3-1
 export const SF_SIGMA_DB = 7.82;   // TR 38.901 UMi-NLOS. LOS would be 4.
@@ -115,6 +131,26 @@ export const GATE_ENABLED = process.env.NEIGHBOUR_GATE !== "off";
 // Consecutive blocks toward the SAME neighbour before we conclude the crowd is
 // leaving the cell and this is handover territory rather than a beam problem.
 export const BLOCK_STREAK_LIMIT = Number(process.env.BLOCK_STREAK ?? 3);
+
+// --- HANDOVER, 3GPP EVENT A3 (TS 38.331) ------------------------------------
+//
+//   Mn + Ofn + Ocn - Hys  >  Mp + Ofp + Ocp + Off
+//
+// A neighbour becomes better than the serving cell by an offset, and stays that
+// way for Time-to-Trigger. It is RSRP against RSRP, WANTED SIGNAL ONLY. The
+// interference work above is a different mechanism entirely and does not appear
+// here — a rising noise floor at a neighbour never triggers a handover.
+//
+// A3 accounts for roughly 90 percent of intra-frequency handovers. Typical values
+// are a3-Offset 3 dB (1-2 aggressive, 4-6 conservative), hysteresis 1-2 dB, and
+// TTT 256-320 ms, both offsets in 0.5 dB steps.
+//
+// TTT IS EXPRESSED IN TICKS HERE. At TICK_MS=1250 a 320 ms timer is sub-tick and
+// would fire instantly, which defeats the point. Three consecutive ticks is the
+// honest equivalent and matches the block-streak rule already used above.
+export const A3_OFFSET_DB = Number(process.env.A3_OFFSET_DB ?? 3.0);
+export const A3_HYST_DB   = Number(process.env.A3_HYST_DB   ?? 2.0);
+export const A3_TTT_TICKS = Number(process.env.A3_TTT_TICKS ?? 3);
 
 // --- neighbour topology -----------------------------------------------------
 //
@@ -165,7 +201,27 @@ const SITES = [
 // Every site is tri-sectored on the same orientation, which is how a real
 // deployment is planned. A UE belongs to whichever sector boresight its bearing
 // from ITS OWN tower is closest to.
-const SECTOR_AZ = [0, 120, 240];
+// Sector orientation is PER SITE, not one global 0/120/240.
+//
+// A planner orients each site's sectors to cover the gaps toward its neighbours.
+// With a single global orientation, site D — directly ahead of us — ends up with a
+// sector BOUNDARY pointing back at us: the bearing from D to our coverage area is
+// 180 degrees, which is 60 degrees off both its 120 and 240 sectors, the worst
+// possible angle. Sites B and C happen to already have a boresight facing us
+// (240 and 120), so only D was misaligned, and it was misaligned by the maximum.
+//
+// Measured effect: at 195 m the crowd registered D at 4 dBi of sector gain instead
+// of about 13, so the best neighbour sat 10 dB below serving and Event A3 could not
+// fire even at the cell edge.
+//
+// Each site's sectors are therefore rotated so one boresight points back along the
+// line to our site. For B and C this changes nothing; for D it rotates 0/120/240
+// to 180/300/60.
+const SECTOR_OFFSETS = [0, 120, 240];
+function sectorAzFor(siteAzDeg) {
+  const back = (siteAzDeg + 180 + 360) % 360;      // bearing from the site back to us
+  return SECTOR_OFFSETS.map(o => (back + o) % 360);
+}
 
 // 60 per site, so roughly 20 per sector. At 20 per site a sector held only 5 to 9
 // users, and a mean over that few is dominated by sampling noise: one user walking
@@ -207,11 +263,11 @@ export class Neighbours {
         // gate fire and unfire at random.
         u._sf  = gaussian(SF_SIGMA_DB);
         u._sfX = u.x; u._sfY = u.y;
-        u.sector = Neighbours.sectorOf(u.x, u.y, pos.x, pos.y);
+        u.sector = Neighbours.sectorOf(u.x, u.y, pos.x, pos.y, sectorAzFor(s.az));
         ues.push(u);
       }
       return { id: s.id, x: pos.x, y: pos.y, az: s.az, dist: s.dist, ues,
-               blockStreak: 0 };
+               sectorAz: sectorAzFor(s.az), blockStreak: 0 };
     });
   }
 
@@ -229,10 +285,10 @@ export class Neighbours {
   // property. An operator alarms per cell and a cell is a sector, so three
   // numbers per site is what an RF engineer expects to read. Do not claim it
   // makes the gate stricter; measurement says it barely moves the verdict.
-  static sectorOf(ux, uy, sx, sy) {
+  static sectorOf(ux, uy, sx, sy, sectorAz) {
     const b = ((Math.atan2(ux - sx, uy - sy) * 180 / Math.PI) % 360 + 360) % 360;
-    let best = SECTOR_AZ[0], bestD = 999;
-    for (const a of SECTOR_AZ) {
+    let best = sectorAz[0], bestD = 999;
+    for (const a of sectorAz) {
       const d = Math.min(Math.abs(b - a), 360 - Math.abs(b - a));
       if (d < bestD) { bestD = d; best = a; }
     }
@@ -265,7 +321,7 @@ export class Neighbours {
           u._sfX = u.x; u._sfY = u.y;
         }
         // a walking user can cross a sector boundary
-        u.sector = Neighbours.sectorOf(u.x, u.y, c.x, c.y);
+        u.sector = Neighbours.sectorOf(u.x, u.y, c.x, c.y, c.sectorAz);
       }
     }
   }
@@ -281,8 +337,20 @@ export class Neighbours {
   // plain addition of two uncapped terms lets the attenuation run to unphysical
   // values far off boresight.
   // ---------------------------------------------------------------------------
-  static gainDb(azOffsetDeg, elOffsetDeg) {
-    const aH = Math.min(12 * Math.pow(azOffsetDeg / 20,        2), A_MAX_DB);
+  // hpbwH: 20 for OUR beamformed SSB beams, 65 for a fixed sector antenna.
+  //
+  // THE AZIMUTH OFFSET MUST BE WRAPPED. Math.atan2 returns (-180, 180] while sector
+  // boresights are stored as 0-360, so `az - a` could come out as -359 instead of
+  // +1. Squared, that is capped at the 30 dB front-to-back floor.
+  //
+  // It bit exactly where it does the most damage: site D sits due north, so its
+  // sector boresight is 180 and a UE directly south reads az = +180 or -180
+  // depending on the sign of x by a metre or two. Half the crowd therefore took a
+  // 30 dB penalty and the other half none, dragging D's mean about 28 dB low and
+  // making a nearer site look weaker than a further one. Event A3 could not fire.
+  static gainDb(azOffsetDeg, elOffsetDeg, hpbwH = 20) {
+    const wrapped = ((azOffsetDeg % 360) + 540) % 360 - 180;   // -> (-180, 180]
+    const aH = Math.min(12 * Math.pow(wrapped / hpbwH,          2), A_MAX_DB);
     const aV = Math.min(12 * Math.pow(elOffsetDeg / HPBW_V_DEG, 2), SLA_V_DB);
     return G_MAX_DBI - Math.min(aH + aV, A_MAX_DB);
   }
@@ -337,7 +405,7 @@ export class Neighbours {
   // ---------------------------------------------------------------------------
   noiseRiseFor(cell, fanCenter, tiltDeg) {
     const nLin = Math.pow(10, N_DBM / 10);
-    const per  = { 0: [], 120: [], 240: [] };
+    const per  = {}; for (const a of cell.sectorAz) per[a] = [];
     const all  = [];
     for (const u of cell.ues) {
       const i  = this.spillOnUeLin(u, fanCenter, tiltDeg);
@@ -347,9 +415,120 @@ export class Neighbours {
     }
     const avg = a => (a.length ? a.reduce((x, y) => x + y, 0) / a.length : 0);
     const sectors = {};
-    for (const a of SECTOR_AZ) sectors[a] = { n: per[a].length, mean: avg(per[a]) };
+    for (const a of cell.sectorAz) sectors[a] = { n: per[a].length, mean: avg(per[a]) };
     all.sort((a, b) => b - a);
     return { worst: all[0], mean: avg(all), sectors };
+  }
+
+  // ---------------------------------------------------------------------------
+  // What a NEIGHBOUR's tower delivers to OUR crowd.
+  //
+  // The reverse of spillOnUeLin: their RU transmitting, our UE receiving. Same
+  // link budget, opposite direction.
+  //
+  // Their beam is not steerable in this simulator, so each of their three sectors
+  // points at a fixed 0/120/240 and we take whichever serves our UE best. That is
+  // what a real UE reports: the strongest neighbour cell, not an average.
+  //
+  // Shadow fading is drawn per link and held on the UE, so it is stable rather
+  // than a fresh dice roll per tick. Without that the handover flag would chatter.
+  // ---------------------------------------------------------------------------
+  neighbourRsrpDbm(ue, cell) {
+    const dx = ue.x - cell.x, dy = ue.y - cell.y;
+    const range = Math.hypot(dx, dy);
+    const d3d   = Math.hypot(range, TOWER_H);
+    const pl    = pathLossNLOS(d3d);
+    const az    = Math.atan2(dx, dy) * 180 / Math.PI;
+    const depression = Math.atan2(TOWER_H, Math.max(1, range)) * 180 / Math.PI;
+
+    // one locked fade per (UE, neighbour) pair
+    ue._nsf = ue._nsf || {};
+    if (ue._nsf[cell.id] === undefined) ue._nsf[cell.id] = gaussian(SF_SIGMA_DB);
+
+    // best of their three fixed sectors, no downtilt commanded so elevation
+    // offset is the depression angle itself
+    let best = -Infinity;
+    for (const a of cell.sectorAz) {
+      const g = Neighbours.gainDb(az - a, depression, HPBW_SECTOR_DEG);
+      const r = P_TX_DBM + g - pl - ue._nsf[cell.id];
+      if (r > best) best = r;
+    }
+    return best;
+  }
+
+  // ---------------------------------------------------------------------------
+  // EVENT A3. Does our crowd now belong to a neighbour?
+  //
+  // Called with the crowd's UEs and the RSRP our own beam delivers to them. The
+  // serving figure is the crowd's mean own-cell RSRP; the neighbour figure is the
+  // mean of the best neighbour cell. Compared per the A3 entry condition, held
+  // for TTT ticks.
+  //
+  // Returns { active, toward, marginDb, ticks }. It reports. It does not act.
+  // ---------------------------------------------------------------------------
+  evaluateHandover(crowdUes, servingRsrpDbm, fanCenter, tiltDeg) {
+    const mean = a => (a.length ? a.reduce((x, y) => x + y, 0) / a.length : -140);
+
+    // LIKE FOR LIKE. This is the part that has to be right or A3 never fires.
+    //
+    // The serving RSRP the model sees comes from geometry.js, which uses the UMi
+    // LOS path loss. The neighbour links here use NLOS. Comparing one against the
+    // other is apples to oranges: at 200 m the two models differ by about 24 dB,
+    // so our own cell always looked 24 dB better than it should and Event A3 could
+    // not fire however far the crowd walked. Measured: serving -55 dBm against a
+    // best neighbour of -93 dBm, a 38 dB margin the wrong way.
+    //
+    // So the A3 comparison recomputes OUR serving RSRP with the SAME NLOS model
+    // used for the neighbours. Both sides, one model, one comparison.
+    //
+    // This figure is used ONLY for the handover decision. It is not what the model
+    // sees and it never touches rsrpPerBeam — geometry.js stays frozen, because
+    // changing it invalidates beam-v9.
+    const servingLike = mean(crowdUes.map(u => {
+      const range = Math.hypot(u.x, u.y);
+      const d3d   = Math.hypot(range, TOWER_H);
+      const az    = Math.atan2(u.x, u.y) * 180 / Math.PI;
+      const dep   = Math.atan2(TOWER_H, Math.max(1, range)) * 180 / Math.PI;
+      u._ssf = (u._ssf === undefined) ? gaussian(SF_SIGMA_DB) : u._ssf;
+      let lin = 0;
+      for (const b of fanAzimuths(fanCenter)) {
+        lin += Math.pow(10, (P_TX_DBM + Neighbours.gainDb(az - b, dep - tiltDeg) - d3d * 0) / 10);
+      }
+      const gainDb = 10 * Math.log10(lin);
+      return P_TX_DBM + (gainDb - P_TX_DBM) - pathLossNLOS(d3d) - u._ssf;
+    }));
+
+    let bestCell = null, bestMean = -Infinity;
+    for (const c of this.cells) {
+      const m = mean(crowdUes.map(u => this.neighbourRsrpDbm(u, c)));
+      if (m > bestMean) { bestMean = m; bestCell = c; }
+    }
+
+    // A3 entry:  Mn - Hys > Mp + Off      (CIO left at 0, we do not write it)
+    const enter = bestMean - A3_HYST_DB > servingLike + A3_OFFSET_DB;
+
+    if (enter && bestCell) {
+      this._a3 = (this._a3 && this._a3.id === bestCell.id)
+        ? { id: bestCell.id, ticks: this._a3.ticks + 1 }
+        : { id: bestCell.id, ticks: 1 };
+    } else {
+      this._a3 = null;
+    }
+
+    const fired = !!(this._a3 && this._a3.ticks >= A3_TTT_TICKS);
+    return {
+      active: fired,
+      toward: fired ? this._a3.id : null,
+      ticks: this._a3 ? this._a3.ticks : 0,
+      ttt: A3_TTT_TICKS,
+      servingDbm: +servingLike.toFixed(1),           // NLOS, like-for-like
+      servingModelDbm: +servingRsrpDbm.toFixed(1),   // what the model sees, LOS
+      bestNeighbourDbm: +bestMean.toFixed(1),
+      bestNeighbourId: bestCell ? bestCell.id : null,
+      marginDb: +(bestMean - servingLike).toFixed(1),
+      offsetDb: A3_OFFSET_DB,
+      hystDb: A3_HYST_DB
+    };
   }
 
   // ---------------------------------------------------------------------------
@@ -367,7 +546,7 @@ export class Neighbours {
       // disagree, because a swing lifts all three sectors of a site together,
       // but the worst sector is the honest thing to test: a budget exists to
       // protect the users who actually suffer, and those sit in one cell.
-      const sectors = SECTOR_AZ.map(a => {
+      const sectors = c.sectorAz.map(a => {
         const d = after.sectors[a].mean - before.sectors[a].mean;
         return {
           az: a,
@@ -436,7 +615,7 @@ export class Neighbours {
         worst: +nr.worst.toFixed(2),
         // three sectors per site, nine across the layout. This is the unit an
         // operator alarms on, so it is the unit the display shows.
-        sectors: SECTOR_AZ.map(a => ({
+        sectors: c.sectorAz.map(a => ({
           az: a, ues: nr.sectors[a].n,
           noiseRise: +nr.sectors[a].mean.toFixed(2)
         })),

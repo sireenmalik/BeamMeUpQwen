@@ -201,6 +201,23 @@ export class ControlLoop {
       }
     }
 
+    // ------------------------------------------------------------------
+    // HANDOVER CHECK, 3GPP EVENT A3.
+    //
+    // Does our crowd still belong to us? A neighbour becoming stronger than we are
+    // by an offset, held for TTT, means these users are the neighbour's now.
+    //
+    // WHAT THIS IS NOT: it is not the interference gate. A3 compares RSRP against
+    // RSRP, wanted signal on both sides. A neighbour's noise floor rising does not
+    // trigger a handover, and our spill into them does not appear here at all.
+    //
+    // The serving figure is the crowd's own-cell RSRP, aggregated the same way
+    // rsrpPerBeam does it: linear mean, never the sum.
+    // ------------------------------------------------------------------
+    const servingLin = rsrp.reduce((a, v) => a + Math.pow(10, v / 10), 0);
+    const servingDbm = 10 * Math.log10(servingLin / rsrp.length);
+    this.handover = this.neighbours.evaluateHandover(ues, servingDbm, this.fanCenter, this.tilt);
+
     // capture the beam position BEFORE this tick's update, so the reason text can
     // describe the actual direction of movement
     const prevFanCenter = this.fanCenter;
@@ -290,6 +307,33 @@ export class ControlLoop {
     // computed because there is no UE transmit power in this simulator. See
     // neighbours.js.
     // ------------------------------------------------------------------
+    // ------------------------------------------------------------------
+    // HANDED OVER: PARK THE BEAM, KEEP PROPOSING.
+    //
+    // The crowd belongs to a neighbour now, so chasing them wastes our energy,
+    // adds interference and serves nobody. The beam holds where they left rather
+    // than returning to boresight, because they may come back the way they went
+    // and we want to pick them up without re-acquiring.
+    //
+    // The model is still called every tick and its proposal is still recorded.
+    // Only the commit is suppressed. That is deliberate: reference.js keeps
+    // writing a trace line, so the run shows whether the model correctly gives up
+    // or keeps trying to chase a crowd that is no longer ours.
+    //
+    // There is NO release logic. When the crowd walks back inside, our RSRP rises,
+    // A3 stops being satisfied, and the model is steering again on its own.
+    // ------------------------------------------------------------------
+    if (this.handover?.active) {
+      dec.proposedWhileHandedOver = { fan_center: modelFan, tilt: modelTilt };
+      chosenFan  = this.fanCenter;      // park
+      chosenTilt = this.tilt;
+      dec.source = "handed-over";
+      dec.notes.push(
+        `crowd handed over to ${this.handover.toward}: neighbour ` +
+        `${this.handover.bestNeighbourDbm} dBm vs serving ${this.handover.servingDbm} dBm, ` +
+        `margin ${this.handover.marginDb} dB. Beam parked, model still proposing.`);
+    }
+
     let gate = this.neighbours.evaluate(this.fanCenter, this.tilt, chosenFan, chosenTilt);
 
     // --- FEASIBLE-STEP SEARCH, not a veto ---------------------------------
@@ -459,6 +503,18 @@ export class ControlLoop {
         cells: gate.cells,
         handover: gate.handover
       },
+      handover_A3: this.handover ? {
+        interface: "3GPP TS 38.331 · Event A3",
+        condition: "Mn - Hys > Mp + Off   (RSRP vs RSRP, wanted signal only)",
+        serving_dBm: this.handover.servingDbm,
+        best_neighbour: this.handover.bestNeighbourId,
+        best_neighbour_dBm: this.handover.bestNeighbourDbm,
+        margin_dB: this.handover.marginDb,
+        a3_offset_dB: this.handover.offsetDb,
+        hysteresis_dB: this.handover.hystDb,
+        ttt: `${this.handover.ticks}/${this.handover.ttt} ticks`,
+        fired: this.handover.active
+      } : null,
       escalation: this.escalation
     };
     this.lastLog = log;
@@ -474,7 +530,10 @@ export class ControlLoop {
     // used only when the model did not decide, and is labelled as such.
     let reasonText;
     const modelReason = String(params.reason || "").trim();
-    if (this.decision.source === "neighbour-blocked") {
+    if (this.decision.source === "handed-over") {
+      reasonText = `[A3] handed over to ${this.handover.toward}, beam parked ` +
+                   `(model asked az ${this.decision.proposedWhileHandedOver?.fan_center})`;
+    } else if (this.decision.source === "neighbour-blocked") {
       reasonText = `[gate] ${this.decision.neighbours.reason}, holding position`;
     } else if (this.decision.source === "neighbour-limited") {
       reasonText = `[gate] ${this.decision.notes[this.decision.notes.length-1]}`;
@@ -524,6 +583,7 @@ export class ControlLoop {
       anomalyArmed: this.anomalyArmed,
       neighbours: this.neighbours.snapshot(this.fanCenter, this.tilt),
       gate: this.decision?.neighbours || null,
+      handover: this.handover || null,
       action: this.lastProposal?.action || "follow",
       decision: this.decision || null,
       proposals: this.proposalHistory || [],

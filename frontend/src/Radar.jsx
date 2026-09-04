@@ -181,6 +181,7 @@ export default function Radar({ state, mode, onWalk, onSplit }) {
   const fan   = state?.fanCenter ?? 0;
   const tilt  = state?.tilt ?? 20;
   const neighbours = state?.neighbours || [];
+  const ho = state?.handover || null;
   const gate = state?.gate || null;
   const budget = gate?.budget ?? 1.0;
 
@@ -464,12 +465,42 @@ export default function Radar({ state, mode, onWalk, onSplit }) {
         </text>
       </g>
 
-      {/* handover flag */}
-      {gate?.handover && (
+      {/* HANDOVER FLAG, over the crowd.
+           Fires on 3GPP Event A3: a neighbour beats us by the offset, held for the
+           time-to-trigger. RSRP against RSRP — the interference gate is a separate
+           mechanism and does not appear here.
+           The gate-derived flag (three blocks toward one neighbour) is kept as a
+           secondary signal, shown only when A3 has not fired. */}
+      {ho?.active && state?.centroid && (() => {
+        const p = polarToScreen(state.centroid.az, state.centroid.range);
+        return <g>
+          <rect x={p.sx - 108} y={p.sy - 52} width="216" height="38" rx="6"
+                fill="#E08A1E" opacity="0.95" />
+          <text x={p.sx} y={p.sy - 36} textAnchor="middle" fontSize="13"
+                fontWeight="700" fill="#fff">
+            HANDOVER → SITE {ho.toward}
+          </text>
+          <text x={p.sx} y={p.sy - 22} textAnchor="middle" fontSize="10" fill="#fff">
+            A3: {ho.bestNeighbourDbm} vs {ho.servingDbm} dBm · +{ho.marginDb} dB · beam parked
+          </text>
+        </g>;
+      })()}
+
+      {/* A3 armed but not yet fired: show the timer building */}
+      {ho && !ho.active && ho.ticks > 0 && state?.centroid && (() => {
+        const p = polarToScreen(state.centroid.az, state.centroid.range);
+        return <text x={p.sx} y={p.sy - 26} textAnchor="middle" fontSize="10"
+                     fontWeight="700" fill="#E08A1E">
+          A3 arming {ho.ticks}/{ho.ttt} → {ho.bestNeighbourId}
+        </text>;
+      })()}
+
+      {/* secondary: the gate's own streak signal */}
+      {gate?.handover && !ho?.active && (
         <g>
-          <rect x={W/2 - 150} y="12" width="300" height="30" rx="6" fill="#E08A1E" />
-          <text x={W/2} y="32" textAnchor="middle" fontSize="12" fontWeight="700" fill="#fff">
-            CROWD LEAVING TOWARD {gate.handover.toward} · HANDOVER
+          <rect x={W/2 - 150} y="12" width="300" height="26" rx="6" fill="#E08A1E" opacity="0.85" />
+          <text x={W/2} y="29" textAnchor="middle" fontSize="11" fontWeight="700" fill="#fff">
+            GATE: repeated blocks toward {gate.handover.toward}
           </text>
         </g>
       )}
