@@ -183,7 +183,7 @@ export default function Radar({ state, mode, onWalk, onSplit }) {
   const neighbours = state?.neighbours || [];
   const ho = state?.handover || null;
   const gate = state?.gate || null;
-  const budget = gate?.budget ?? 1.0;
+  const ceiling = gate?.ceiling ?? gate?.budget ?? 4.0;
 
   // --- beam footprint drawn from the COMMANDED beam config ---
   // Honesty rule: the picture comes from what the rApp commanded (fan_center and
@@ -461,7 +461,7 @@ export default function Radar({ state, mode, onWalk, onSplit }) {
               fontWeight={gate?.observeMode ? "700" : "400"}>
           {gate?.observeMode
             ? `OBSERVE MODE — gate off, every move commits. Deltas still computed.`
-            : `budget ${budget} dB per move · downlink spill only · ISD ${ISD} m`}
+            : `neighbour ceiling ${ceiling} dB · downlink spill only · ISD ${ISD} m`}
         </text>
       </g>
 

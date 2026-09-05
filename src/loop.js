@@ -38,7 +38,8 @@ import { AzimuthSmoother } from "./filter.js";
 import { decide, MODEL_INFO, USES_MODEL_TILT } from "./model.js";
 import { validateAndFormat } from "./formatter.js";
 import { record as recordReference } from "./reference.js";
-import { Neighbours } from "./neighbours.js";
+import { Neighbours, isGateEnabled, setGateEnabled,
+         getCeiling, setCeiling, MAX_STEP_DEG } from "./neighbours.js";
 import { fanAzimuths, toPolar, TOWER_H,
          rsrpPerBeam, rsrpCentroid, RSRP_MIN } from "./geometry.js";
 
@@ -68,6 +69,27 @@ export class ControlLoop {
 
   // arm the chaos detector ONLY while the Detect Chaos use case is active.
   // arming/disarming also clears any visible anomaly (switching use case wipes the banner).
+  // The neighbour gate is a demo switch, not a safety property that can be
+  // quietly turned off in production. It is exposed so both behaviours can be
+  // shown side by side: gate ON, moves get limited and the beam creeps; gate OFF,
+  // every move commits and the neighbour numbers show what it WOULD have stopped.
+  setGate(on) { return setGateEnabled(on); }
+  gateOn() { return isGateEnabled(); }
+
+  // The interference ceiling, in dB of noise rise at the worst neighbour sector.
+  // Exposed as a live dial because it IS the coverage/capacity trade-off: turn it
+  // down and the beam stops reaching sooner, leaving our own crowd unserved; turn
+  // it up and we serve them to the sector edge and a neighbour pays for it.
+  //
+  // Measured, at ISD 250 m with the crowd walking straight out:
+  //     1 dB -> beam stops reaching at  50 m
+  //     3 dB -> 70 m      4 dB -> 82 m      5 dB -> 104 m
+  //     6 dB -> 180 m, by which point handover has already fired
+  //     8 dB -> never, tracks to the sector edge
+  // Above about 6 dB the ceiling stops mattering, because the beam never causes
+  // more than 5.6 dB in this geometry.
+  setCeiling(v) { return setCeiling(v); }
+
   setAnomalyArmed(on) {
     this.anomalyArmed = !!on;
     this.anomaly = null;
@@ -334,6 +356,15 @@ export class ControlLoop {
         `margin ${this.handover.marginDb} dB. Beam parked, model still proposing.`);
     }
 
+    // SEARCH GUARD, not a safety limit. Caps how far one commit may move so a
+    // click across the sector creeps over a few ticks instead of lurching. The
+    // interference constraint is the ceiling below; this is separate and smaller.
+    const stepFan = chosenFan - this.fanCenter;
+    if (Math.abs(stepFan) > MAX_STEP_DEG) {
+      chosenFan = this.fanCenter + Math.sign(stepFan) * MAX_STEP_DEG;
+      dec.notes.push(`step capped at ${MAX_STEP_DEG}\u00b0`);
+    }
+
     let gate = this.neighbours.evaluate(this.fanCenter, this.tilt, chosenFan, chosenTilt);
 
     // --- FEASIBLE-STEP SEARCH, not a veto ---------------------------------
@@ -356,42 +387,53 @@ export class ControlLoop {
     // the gate only decides how far it may go this tick. If nothing fits, the
     // beam holds — it never falls back to an aim of the tool's own making.
     // ----------------------------------------------------------------------
-    // Binary search for the largest allowed fraction, rather than a fixed ladder.
+    // ------------------------------------------------------------------
+    // WHEN THE CEILING IS HIT: CAP THE REACH, KEEP THE TURN.
     //
-    // A ladder with a smallest rung deadlocks whenever even that rung is over
-    // budget. Measured with the crowd 29 deg off boresight: the smallest rung was
-    // 7 percent, which is a 2 deg move, which costs 1.35 dB against a 1.0 dB
-    // budget. Blocked. The beam froze again, just less obviously than before.
+    // Blocking outright freezes the beam and the crowd walks away from it. But the
+    // two knobs do not cost the same. Measured at 120 m: a 3 degree turn costs a
+    // neighbour 0.13 dB, while tilting out from 20 to 15 degrees costs 1.95 dB.
     //
-    // Bisection has no smallest rung. It converges on whatever the budget does
-    // allow, even if that is a fraction of a degree, so the beam always creeps
-    // rather than stopping dead.
+    // Reaching further is what lights up the cell in front of you. Turning barely
+    // registers. So when the ceiling trips, TILT holds at the last value that
+    // satisfied it and AZIMUTH stays free — the beam keeps following the crowd
+    // sideways and simply stops chasing them outward.
+    //
+    // If azimuth alone still breaks the ceiling, bisect on it. Bisection rather
+    // than a fixed ladder because a ladder with a smallest rung deadlocks whenever
+    // even that rung is over.
+    // ------------------------------------------------------------------
     if (!gate.allowed && Number.isFinite(modelFan)) {
       const fromFan = this.fanCenter, fromTilt = this.tilt;
-      const at = (f) => this.neighbours.evaluate(
-        fromFan, fromTilt,
-        fromFan  + (chosenFan  - fromFan)  * f,
-        fromTilt + (chosenTilt - fromTilt) * f);
 
-      let lo = 0, hi = 1, best = null;
-      for (let i = 0; i < 8; i++) {
-        const mid = (lo + hi) / 2;
-        const g2 = at(mid);
-        if (g2.allowed) { best = { f: mid, g: g2 }; lo = mid; } else { hi = mid; }
-      }
-
-      if (best && best.f > 0.004) {
-        const tryFan  = fromFan  + (chosenFan  - fromFan)  * best.f;
-        const tryTilt = fromTilt + (chosenTilt - fromTilt) * best.f;
+      // 1. hold tilt, keep the proposed azimuth
+      const holdTilt = this.neighbours.evaluate(fromFan, fromTilt, chosenFan, fromTilt);
+      if (holdTilt.allowed) {
         dec.notes.push(
-          `full move to ${chosenFan.toFixed(1)}\u00b0 costs ` +
-          `${gate.worstDelta.toFixed(2)}dB at ${gate.worstCell}, budget ` +
-          `${gate.budget}dB. Took ${Math.round(best.f*100)}% ` +
-          `to ${tryFan.toFixed(1)}\u00b0`);
-        chosenFan  = tryFan;
-        chosenTilt = tryTilt;
-        gate = best.g;
-        dec.source = "neighbour-limited";
+          `ceiling ${gate.ceiling}dB reached at ${gate.worstCell} (${gate.worstPeak}dB): ` +
+          `tilt held at ${fromTilt.toFixed(1)}\u00b0, still turning`);
+        chosenTilt = fromTilt;
+        gate = holdTilt;
+        dec.source = "ceiling-limited";
+      } else {
+        // 2. azimuth alone is still over: bisect on it, tilt still held
+        const at = (f) => this.neighbours.evaluate(
+          fromFan, fromTilt, fromFan + (chosenFan - fromFan) * f, fromTilt);
+        let lo = 0, hi = 1, best = null;
+        for (let i = 0; i < 8; i++) {
+          const mid = (lo + hi) / 2;
+          const g2 = at(mid);
+          if (g2.allowed) { best = { f: mid, g: g2 }; lo = mid; } else { hi = mid; }
+        }
+        if (best && best.f > 0.004) {
+          chosenFan  = fromFan + (chosenFan - fromFan) * best.f;
+          chosenTilt = fromTilt;
+          gate = best.g;
+          dec.source = "ceiling-limited";
+          dec.notes.push(
+            `ceiling ${gate.ceiling}dB: tilt held, turn cut to ` +
+            `${Math.round(best.f*100)}% -> ${chosenFan.toFixed(1)}\u00b0`);
+        }
       }
     }
 
@@ -498,7 +540,9 @@ export class ControlLoop {
       neighbour_gate: {
         interface: "rApp internal · deterministic policy",
         scope: "downlink spill only, our RU into their UEs",
-        budget_dB: gate.budget,
+        ceiling_dB: gate.ceiling,
+        hysteresis_dB: gate.hysteresis,
+        worst_cell_peak_dB: gate.worstPeak,
         allowed: gate.allowed,
         cells: gate.cells,
         handover: gate.handover
@@ -535,7 +579,7 @@ export class ControlLoop {
                    `(model asked az ${this.decision.proposedWhileHandedOver?.fan_center})`;
     } else if (this.decision.source === "neighbour-blocked") {
       reasonText = `[gate] ${this.decision.neighbours.reason}, holding position`;
-    } else if (this.decision.source === "neighbour-limited") {
+    } else if (this.decision.source === "ceiling-limited") {
       reasonText = `[gate] ${this.decision.notes[this.decision.notes.length-1]}`;
     } else if (this.decision.source === "no-decision") {
       reasonText = "[tool] no usable model output, holding position";
@@ -582,6 +626,8 @@ export class ControlLoop {
       anomaly: this.anomaly,
       anomalyArmed: this.anomalyArmed,
       neighbours: this.neighbours.snapshot(this.fanCenter, this.tilt),
+      gateEnabled: isGateEnabled(),
+      ceilingDb: getCeiling(),
       gate: this.decision?.neighbours || null,
       handover: this.handover || null,
       action: this.lastProposal?.action || "follow",

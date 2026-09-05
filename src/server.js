@@ -57,6 +57,17 @@ app.post("/api/escalation/clear", (_req, res) => { loop.clearEscalation(); res.j
 // display, never committed — so switching it produced an identical beam. Restoring
 // forecast behaviour means new training labels and a new adapter, not an endpoint.
 
+// enable/disable the neighbour gate at runtime. This only changes whether the
+// verdict is ENFORCED — the harm is computed and displayed either way, so the
+// numbers on screen are the same and only the beam's behaviour differs.
+app.post("/api/gate", (req, res) => { const on = loop.setGate(req.body?.on); res.json({ ok: true, gateEnabled: on }); });
+
+// the interference ceiling dial, in dB of noise rise at the worst neighbour
+// sector. This IS the coverage/capacity trade-off: lower it and the beam stops
+// reaching sooner, leaving our own crowd unserved; raise it and we serve them to
+// the sector edge and a neighbour pays.
+app.post("/api/ceiling", (req, res) => { const v = loop.setCeiling(req.body?.db); res.json({ ok: true, ceilingDb: v }); });
+
 // arm/disarm the read-only chaos detector (armed only while Detect Chaos use case is active)
 app.post("/api/anomaly/arm", (req, res) => { const on = loop.setAnomalyArmed(req.body?.on); res.json({ ok: true, armed: on }); });
 // explicit run control: a mode turns the loop ON; turning the mode off STOPS it

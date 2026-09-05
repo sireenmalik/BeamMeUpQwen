@@ -65,7 +65,34 @@ export default function App() {
   const activeRef = useRef(null);
   activeRef.current = active;
 
-  const refresh = useCallback(async () => { try { setState(await api("/api/state")); } catch {} }, []);
+  // Neighbour gate: enforced or observe-only. Mirrors the server, which owns the
+  // truth, so a page reload picks up whatever the loop is actually doing.
+  const [gateOn, setGateOn] = useState(true);
+  // The interference ceiling, in dB. Debounced on the way out so dragging the
+  // slider does not fire a request per pixel; the server owns the truth and the
+  // poll pulls it back.
+  const [ceiling, setCeilingUI] = useState(4);
+  const ceilTimer = useRef(null);
+  const onCeiling = (v) => {
+    setCeilingUI(v);
+    clearTimeout(ceilTimer.current);
+    ceilTimer.current = setTimeout(() => api("/api/ceiling", { db: v }), 120);
+  };
+
+  const toggleGate = () => {
+    const next = !gateOn;
+    setGateOn(next);
+    api("/api/gate", { on: next });
+  };
+
+  const refresh = useCallback(async () => {
+    try {
+      const st = await api("/api/state");
+      setState(st);
+      if (st && typeof st.gateEnabled === "boolean") setGateOn(st.gateEnabled);
+      if (st && typeof st.ceilingDb === "number" && !ceilTimer.current) setCeilingUI(st.ceilingDb);
+    } catch {}
+  }, []);
   useEffect(() => { refresh(); const id = setInterval(refresh, 500); return () => clearInterval(id); }, [refresh]);
 
   // ---- proposals scroll: pin to bottom unless the user has scrolled up ----
@@ -221,7 +248,45 @@ export default function App() {
             on={active === m.key} onClick={() => selectMode(m.key)} />
         ))}
         <span className="mx-1 text-slate-300">|</span>
-        <span className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">Beam</span>
+
+        {/* Neighbour gate switch.
+            ON  — a move that costs a neighbour more than the budget is trimmed to
+                  the largest part that fits, and the beam creeps.
+            OFF — every move commits. The harm is still computed and the cells still
+                  turn red, so you see exactly what would have been stopped.
+            The maths does not change either way; only enforcement does. */}
+        <button onClick={toggleGate}
+          className={`shrink-0 px-2.5 py-1 rounded-md text-xs font-medium border transition-colors ${
+            gateOn ? "bg-slate-800 text-white border-slate-800"
+                   : "bg-amber-50 text-amber-800 border-amber-300"}`}>
+          <span className={`inline-block w-1.5 h-1.5 rounded-full mr-1.5 align-middle ${
+            gateOn ? "bg-emerald-400" : "bg-amber-500"}`} />
+          Beam Blocking
+          <span className="ml-1 opacity-80">{gateOn ? "ON" : "OFF"}</span>
+        </button>
+        {/* The interference ceiling. This is the whole coverage/capacity trade-off
+            as one control: drag left and the beam stops reaching early, leaving our
+            own crowd unserved; drag right and we serve them to the edge and a
+            neighbour pays for it. Measured stop distances at ISD 250 m:
+              2 dB -> 60 m    3 dB -> 65 m    4 dB -> 75 m
+              5 dB -> 95 m    6 dB -> 125 m   above ~6 dB it stops mattering,
+            because the beam never causes more than about 5.6 dB here. */}
+        <div className={`flex items-center gap-1.5 ${gateOn ? "" : "opacity-40"}`}>
+          <span className="text-[10px] font-semibold uppercase tracking-wide text-slate-400">
+            Neighbour ceiling
+          </span>
+          <input type="range" min="1" max="8" step="0.5" value={ceiling}
+                 disabled={!gateOn}
+                 onChange={(e) => onCeiling(Number(e.target.value))}
+                 className="w-28 accent-teal-600" />
+          <span className="text-[11px] font-mono text-slate-700 w-12">{ceiling.toFixed(1)} dB</span>
+        </div>
+        <span className="text-[10px] text-slate-400">
+          {!gateOn ? "observe only · harm shown, nothing blocked"
+                   : "protect neighbours ←→ serve my crowd"}
+        </span>
+
+        <span className="mx-1 text-slate-300">|</span>
         <span className="text-[11px] text-slate-600 font-mono">
           model decides · no fallback · holds on failure
         </span>
@@ -285,7 +350,7 @@ export default function App() {
                       {p.source === "model-partial" && <span className="ml-2 text-amber-700 not-italic">← LLM (tilt held)</span>}
                       {p.source === "no-decision" && <span className="ml-2 text-red-600 not-italic">← no decision · held</span>}
                       {p.source === "neighbour-blocked" && <span className="ml-2 text-red-600 not-italic">← neighbour gate · BLOCKED</span>}
-                      {p.source === "neighbour-limited" && <span className="ml-2 text-amber-700 not-italic">← neighbour gate · LIMITED</span>}
+                      {p.source === "ceiling-limited" && <span className="ml-2 text-amber-700 not-italic">← ceiling · reach capped</span>}
                       {p.source === "handed-over" && <span className="ml-2 text-amber-600 not-italic">← A3 · HANDED OVER, beam parked</span>}
                     </div>
                     {/* The only thing that can still rewrite the model's number is the

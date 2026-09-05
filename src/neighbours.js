@@ -100,21 +100,54 @@ export const SF_SIGMA_DB = 7.82;   // TR 38.901 UMi-NLOS. LOS would be 4.
 // -174 is thermal noise per hertz at room temperature. Physics, not a choice.
 export const N_DBM = -174 + UE_NF_DB + 10 * Math.log10(BW_HZ);   // -87.0 dBm
 
-// --- the budget -------------------------------------------------------------
+// --- the interference limit --------------------------------------------------
 //
-// The gate compares BEFORE and AFTER, not against an absolute level.
+// AN ABSOLUTE CEILING ON NOISE RISE, NOT A LIMIT ON THE SIZE OF EACH MOVE.
 //
-// This matters. In any real network the absolute noise rise at a cell is already
-// several dB — everyone reuses the same frequency. An absolute ceiling of 1 dB
-// would block every move ever proposed. What the 1 dB actually bounds, per the
-// ITU-R interference protection criterion (equivalently I/N <= -6 dB), is how
-// much ONE action may ADD.
-// MEASURED, and it moves with ISD. At the original 200 m with LOS links, 1.0 dB
-// permitted only about 1.5 degrees of beam movement per tick against a crowd that
-// walks 1-3, so the gate blocked constantly. With NLOS links and ISD 250 m it is
-// much looser. Re-measure after any ISD change rather than assuming this number
-// still means what it did.
-export const DELTA_BUDGET_DB = Number(process.env.NEIGHBOUR_BUDGET_DB ?? 1.0);
+// This replaces the earlier per-move delta budget, which was my invention and not
+// what anyone actually does. Checking the literature:
+//
+//   ITU-R protection criterion: I/N <= -6 dB, equivalently 1 dB of noise rise.
+//     That is a limit on the TOTAL contribution from an interferer, not on a
+//     change.
+//   3GPP energy saving: step the power down by one fixed step, then check whether
+//     the SINR condition still holds. Fixed small step, evaluate the RESULTING
+//     STATE.
+//   CCO optimisation work: evaluates the resulting network state (RSRQ, SINR,
+//     throughput). Interference is a cost term in the objective. Nothing asks how
+//     big the change was.
+//
+// Small steps do appear in the literature, but as a SEARCH method — you step small
+// because a large jump might land somewhere bad and you cannot evaluate it first.
+// Not because the jump itself is the danger. So the step cap below is kept, and
+// demoted to what it actually is.
+//
+// The delta budget also had a hole this fixes. It bounded the rate of harm and not
+// the total, so a crowd walking out accumulated 5 dB at a neighbour with every
+// individual step passing. Measured: 0.3 dB at 40 m rising to 5.6 dB at 200 m,
+// never once blocked.
+export const CEILING_DB = Number(process.env.NEIGHBOUR_CEILING_DB ?? 4.0);
+
+// HYSTERESIS. Block above the ceiling, release only below (ceiling - H).
+//
+// Without it a cell sitting at 3.95 dB against a 4.0 dB ceiling starts and stops
+// tracking on alternate ticks and the beam visibly stutters. Same latch pattern
+// A3 uses, and for the same reason.
+export const CEILING_HYST_DB = Number(process.env.NEIGHBOUR_CEILING_HYST ?? 0.5);
+
+// Search guard, NOT a safety limit. Caps how far one commit may move so a click
+// across the sector creeps over a few ticks instead of lurching. Stated separately
+// so nobody mistakes it for the interference constraint.
+export const MAX_STEP_DEG = Number(process.env.MAX_STEP_DEG ?? 15);
+
+// Runtime dial. The slider writes this; the env sets the starting value.
+let ceilingDb = CEILING_DB;
+export const getCeiling = () => ceilingDb;
+export function setCeiling(v) {
+  const n = Number(v);
+  if (Number.isFinite(n)) ceilingDb = Math.max(0.5, Math.min(12, n));
+  return ceilingDb;
+}
 
 // OBSERVE MODE. Set NEIGHBOUR_GATE=off to compute and display everything while
 // letting every move commit.
@@ -126,7 +159,12 @@ export const DELTA_BUDGET_DB = Number(process.env.NEIGHBOUR_BUDGET_DB ?? 1.0);
 // goes hot and the ones you are pointing away from go cold.
 //
 // The maths is unchanged in this mode. Only the verdict is forced to allow.
-export const GATE_ENABLED = process.env.NEIGHBOUR_GATE !== "off";
+// Runtime toggle, not just an env flag. The env sets the STARTING state; the UI
+// switch flips it live, so both behaviours can be shown in one session without a
+// restart.
+let gateEnabled = process.env.NEIGHBOUR_GATE !== "off";
+export const isGateEnabled = () => gateEnabled;
+export function setGateEnabled(on) { gateEnabled = !!on; return gateEnabled; }
 
 // Consecutive blocks toward the SAME neighbour before we conclude the crowd is
 // leaving the cell and this is handover territory rather than a beam problem.
@@ -546,72 +584,75 @@ export class Neighbours {
   // ---------------------------------------------------------------------------
   // THE GATE. Called before commit.
   //
-  // Returns { allowed, cells[], worstCell, worstDelta, reason }.
-  // It computes and reports. It does not apply anything.
+  // Tests the RESULTING STATE against an absolute ceiling, latched with
+  // hysteresis. It reports; it does not apply anything.
+  //
+  // `latched` is per cell. A cell that has tripped stays tripped until its noise
+  // rise falls below (ceiling - hysteresis), so the verdict cannot flap tick to
+  // tick while a cell hovers at the line.
   // ---------------------------------------------------------------------------
   evaluate(currentFan, currentTilt, proposedFan, proposedTilt) {
+    const cap = ceilingDb;
+    const rel = cap - CEILING_HYST_DB;
+
     const cells = this.cells.map(c => {
       const before = this.noiseRiseFor(c, currentFan,  currentTilt);
       const after  = this.noiseRiseFor(c, proposedFan, proposedTilt);
-      // Per-sector deltas, plus the site-level figure. The gate reads the WORST
-      // SECTOR rather than the site mean. Measurement says the two rarely
-      // disagree, because a swing lifts all three sectors of a site together,
-      // but the worst sector is the honest thing to test: a budget exists to
-      // protect the users who actually suffer, and those sit in one cell.
-      const sectors = c.sectorAz.map(a => {
-        const d = after.sectors[a].mean - before.sectors[a].mean;
-        return {
-          az: a,
-          ues: after.sectors[a].n,
-          before: +before.sectors[a].mean.toFixed(2),
-          after:  +after.sectors[a].mean.toFixed(2),
-          delta:  +d.toFixed(2),
-          overBudget: d > DELTA_BUDGET_DB
-        };
-      });
-      const worstSector = sectors.reduce((x, y) => (y.delta > x.delta ? y : x));
+
+      // Per sector, so the display shows the unit an operator alarms on. The
+      // ceiling is tested on the WORST sector, not the site mean: a budget exists
+      // to protect the users who actually suffer, and those sit in one cell.
+      const sectors = c.sectorAz.map(a => ({
+        az: a,
+        ues: after.sectors[a].n,
+        before: +before.sectors[a].mean.toFixed(2),
+        after:  +after.sectors[a].mean.toFixed(2),
+        delta:  +(after.sectors[a].mean - before.sectors[a].mean).toFixed(2),
+        overCeiling: after.sectors[a].mean > cap
+      }));
+      const worstSector = sectors.reduce((x, y) => (y.after > x.after ? y : x));
+
+      // latch, per cell
+      c._latched = c._latched
+        ? worstSector.after > rel          // stay tripped until it drops below rel
+        : worstSector.after > cap;         // trip when it exceeds cap
+
       return {
         id: c.id,
         sectors,
         worstSectorAz: worstSector.az,
         before: +before.mean.toFixed(2),
         after:  +after.mean.toFixed(2),
-        delta:  +worstSector.delta.toFixed(2),
-        siteDelta: +(after.mean - before.mean).toFixed(2),
-        overBudget: worstSector.delta > DELTA_BUDGET_DB
+        peak:   +worstSector.after.toFixed(2),   // worst sector's resulting rise
+        delta:  +(worstSector.after - worstSector.before).toFixed(2),
+        overBudget: c._latched                    // name kept: the UI reads it
       };
     });
 
-    const over = cells.filter(c => c.overBudget);
-    const worst = cells.reduce((a, b) => (b.delta > a.delta ? b : a), cells[0]);
+    const over  = cells.filter(c => c.overBudget);
+    const worst = cells.reduce((a, b) => (b.peak > a.peak ? b : a), cells[0]);
 
-    // Streak is per neighbour and keyed to the NEIGHBOUR, not to the knob values.
-    // A blacklist keyed on the proposed angles never matches again once the crowd
-    // has moved a step, and it grows without bound.
     for (const c of this.cells) {
       const hit = over.find(o => o.id === c.id);
       c.blockStreak = hit ? c.blockStreak + 1 : 0;
     }
-    const streaked = GATE_ENABLED
+    const streaked = gateEnabled
       ? this.cells.find(c => c.blockStreak >= BLOCK_STREAK_LIMIT)
       : null;
 
     return {
-      // In observe mode every move is allowed. `cells` still carries the real
-      // deltas and `overBudget` flags, so the display shows what WOULD have been
-      // blocked without acting on it.
-      allowed: GATE_ENABLED ? over.length === 0 : true,
-      observeMode: !GATE_ENABLED,
+      allowed: gateEnabled ? over.length === 0 : true,
+      observeMode: !gateEnabled,
       cells,
       worstCell: worst.id,
+      worstPeak: worst.peak,
       worstDelta: worst.delta,
-      budget: DELTA_BUDGET_DB,
-      // Three consecutive blocks toward the same neighbour is not a beam problem.
-      // It means the crowd is walking out of this cell and into that one, so the
-      // right answer is handover, not a bigger tilt. The cell has done its job.
+      ceiling: cap,
+      hysteresis: CEILING_HYST_DB,
+      budget: cap,                     // legacy name, still read by the UI
       handover: streaked ? { toward: streaked.id, streak: streaked.blockStreak } : null,
       reason: over.length
-        ? `${over.map(o => `${o.id}/${o.worstSectorAz}\u00b0 +${o.delta}dB`).join(", ")} over ${DELTA_BUDGET_DB}dB budget`
+        ? `${over.map(o => `${o.id}/${o.worstSectorAz}\u00b0 at ${o.peak}dB`).join(", ")} over ${cap}dB ceiling`
         : null
     };
   }
