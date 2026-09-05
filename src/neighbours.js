@@ -109,11 +109,11 @@ export const N_DBM = -174 + UE_NF_DB + 10 * Math.log10(BW_HZ);   // -87.0 dBm
 // would block every move ever proposed. What the 1 dB actually bounds, per the
 // ITU-R interference protection criterion (equivalently I/N <= -6 dB), is how
 // much ONE action may ADD.
-// MEASURED CONSEQUENCE in this topology: 1.0 dB permits a beam move of roughly
-// 1.5 degrees per tick. The crowd walks at 1-3 deg per tick, so the gate WILL block
-// regularly. That is not a bug and the budget should not be quietly loosened to hide
-// it — three neighbours at 200 m with line of sight is a dense urban worst case, and
-// a tight gate is the correct answer there. Raise it only with a stated reason.
+// MEASURED, and it moves with ISD. At the original 200 m with LOS links, 1.0 dB
+// permitted only about 1.5 degrees of beam movement per tick against a crowd that
+// walks 1-3, so the gate blocked constantly. With NLOS links and ISD 250 m it is
+// much looser. Re-measure after any ISD change rather than assuming this number
+// still means what it did.
 export const DELTA_BUDGET_DB = Number(process.env.NEIGHBOUR_BUDGET_DB ?? 1.0);
 
 // OBSERVE MODE. Set NEIGHBOUR_GATE=off to compute and display everything while
@@ -154,48 +154,49 @@ export const A3_TTT_TICKS = Number(process.env.A3_TTT_TICKS ?? 3);
 
 // --- neighbour topology -----------------------------------------------------
 //
-// Three cells placed where our beam can plausibly reach them, so the demo is
-// legible: steering right loads B, left loads C, reaching out loads D.
+// Three sites on a hex lattice: ISD on 60 degree bearings, our serving sector
+// facing north, so these are the three it can reach. Not the full 19-site
+// wrap-around grid, which is for statistical evaluation, not a single-sector demo.
 //
-// TR 38.901 UMi is ISD 200 m, which is what these distances are drawn from. This
-// is NOT the full 19-site hex grid — that is for statistical evaluation with
-// wrap-around, and it is not what a single-sector demo needs.
-// A hex lattice puts neighbouring sites at ISD on 60 degree bearings. The earlier
-// placement (B and C at 45 deg, D at 260 m) was not a lattice position at all.
-// Our serving sector faces north, so these are the three sites it can reach.
-// ISD 400 m. Chosen by measurement, not by picking a standard scenario.
+// ISD IS 250 m, AND IT WAS SET BY THE HANDOVER ARITHMETIC, NOT BY PICKING A
+// STANDARD SCENARIO.
 //
-// The crowd is allowed out to 200 m, matching gen_v9.py. The handover boundary
-// sits near ISD/2, so 400 m puts it at exactly 200 m: the whole trained range is
-// legitimately inside our own cell, and a crowd at the far edge is right at the
-// point where it would hand over.
+// Two constraints pull in opposite directions:
 //
-// The interference numbers were the other half of the choice. Worst-case noise
-// rise at a neighbour, main lobe pointed straight at it:
-//     ISD 200 m -> 11.9 dB   boundary 100 m   crowd stands on their tower
-//     ISD 300 m ->  6.6 dB   boundary 150 m
-//     ISD 400 m ->  3.6 dB   boundary 200 m   <- matches the trained range
-//     ISD 500 m ->  2.0 dB   boundary 250 m   gate never fires, no demo left
+//   Interference. Worst-case noise rise at a neighbour, main lobe on it:
+//       200 m -> 11.9 dB      250 m ->  6.4 dB (measured)
+//       300 m ->  6.6 dB      400 m ->  3.6 dB      500 m -> 2.0 dB
+//     Further is calmer, but past 400 m the gate has nothing to do.
 //
-// At 500 m every move costs under half a decibel and the gate has nothing to do.
-// At 200 m the geometry is wrong. 400 m is where both work.
+//   Handover. The A3 crossover sits near ISD/2, but not exactly: we beamform five
+//     SSB beams at 16.5 dBi combined while a neighbour runs one fixed 65 degree
+//     sector at 15 dBi, so we stay ahead past the geometric midpoint. Measured at
+//     ISD 400: at 200 m, which is the crowd clamp, serving was STILL 2.6 dB ahead.
+//     Add the A3 entry margin of 5 dB and the crossover sat about 20 m beyond
+//     anywhere the crowd could walk. Event A3 could never fire.
 //
-// The crowd is allowed out to 200 m, matching what the training data covers. At an
-// ISD of 200 m the handover boundary sits around 100 m, so a crowd at 200 m would
-// be standing on a neighbour's tower and would in reality have handed over long
-// ago. At 500 m the boundary is 250 m, so the whole training range is legitimately
-// inside our own cell.
+// 250 m puts the midpoint at 125 m and the measured crossover near 110 m, well
+// inside the 200 m clamp.
 //
-// It also calms the interference numbers: 2.5x the distance at 35 dB per decade of
-// NLOS path loss is about 14 dB less spill.
+// KNOWN COST at 250 m, stated rather than discovered later:
+//   - interference roughly doubles against 400 m, 3.6 -> 6.4 dB worst case
+//   - handover fires early, around 110 m, barely past half the sector
+//   - and it does NOT release cleanly: walking back to 109 m the margin was still
+//     12 dB and the cell stayed handed over
 //
-// NOTE: the DRAWING compresses this. Radar.jsx places the sites at a fixed screen
-// radius so the layout stays readable, and labels the link "ISD 500 m (compressed)".
-// The physics here uses the true 500 m. Do not read screen distance as real distance.
+// If the "walk back in and tracking resumes" moment matters more than firing
+// early, 300 m is the better number: midpoint 150 m, crossover near 160-170 m,
+// interference about 5 dB. One value, three places.
+//
+// NOTE ON THE DRAWING. Radar.jsx places the sites at a FIXED screen radius, not at
+// this distance, because drawing to scale shrinks the serving sector to a corner
+// of the canvas. Bearings are true, the radius is compressed, and the ISD line is
+// labelled so. The physics here uses the real number. Do not read screen distance
+// as real distance.
 const SITES = [
-  { id: "B", az:  60, dist: 400 },
-  { id: "C", az: -60, dist: 400 },
-  { id: "D", az:   0, dist: 400 },
+  { id: "B", az:  60, dist: 250 },
+  { id: "C", az: -60, dist: 250 },
+  { id: "D", az:   0, dist: 250 },
 ];
 
 // Every site is tri-sectored on the same orientation, which is how a real
@@ -445,11 +446,22 @@ export class Neighbours {
     ue._nsf = ue._nsf || {};
     if (ue._nsf[cell.id] === undefined) ue._nsf[cell.id] = gaussian(SF_SIGMA_DB);
 
-    // best of their three fixed sectors, no downtilt commanded so elevation
-    // offset is the depression angle itself
+    // NEIGHBOURS HAVE DOWNTILT. A real sector is tilted to put its boresight near
+    // the cell edge; a sector left at 0 degrees points at the horizon and cannot
+    // serve anyone close to its own tower.
+    //
+    // That was a real failure: with no tilt, a UE 50 m from a neighbour sat 26.6
+    // degrees below its boresight, which is 21 dB of vertical attenuation, so the
+    // neighbour read WEAKER right underneath itself than it did 130 m away. The
+    // A3 margin peaked mid-cell and then fell, and handover could not fire near
+    // the neighbour at all.
+    //
+    // Tilt is derived from the cell size rather than hardcoded, so it follows any
+    // change to ISD: boresight aimed at the cell edge, ISD/2.
+    const nTilt = Math.atan2(TOWER_H, cell.dist / 2) * 180 / Math.PI;
     let best = -Infinity;
     for (const a of cell.sectorAz) {
-      const g = Neighbours.gainDb(az - a, depression, HPBW_SECTOR_DEG);
+      const g = Neighbours.gainDb(az - a, depression - nTilt, HPBW_SECTOR_DEG);
       const r = P_TX_DBM + g - pl - ue._nsf[cell.id];
       if (r > best) best = r;
     }

@@ -44,7 +44,7 @@ const TOWER_H = 25;                                // matches backend geometry
 // every training run covered distances the crowd could never reach.
 const RANGE_MAX = 200;
 // TRUE inter-site distance, used by the physics in neighbours.js.
-const ISD = 400;
+const ISD = 250;
 // DRAWN inter-site distance. Sites are placed at a fixed screen radius instead of
 // their true 500 m, because drawing to scale would shrink the serving sector to a
 // quarter of the canvas and this picture is about that sector. Bearings are true;
