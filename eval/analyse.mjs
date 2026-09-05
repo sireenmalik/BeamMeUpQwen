@@ -30,8 +30,14 @@ import path from "path";
 const DIR = process.env.REFERENCE_DIR || "traces";
 
 function newestTrace() {
+  // Exclude our OWN output. The retraining set is written next to the trace as
+  // reference-<ts>.retrain.jsonl, which also starts with "reference-" and ends
+  // with ".jsonl", and sorts AFTER the trace it came from — so the newest-file
+  // rule picked it every time after the first run. It has a different schema, so
+  // the next line to touch r.model threw.
   const files = fs.readdirSync(DIR)
-    .filter(f => f.startsWith("reference-") && f.endsWith(".jsonl"))
+    .filter(f => f.startsWith("reference-") && f.endsWith(".jsonl")
+                 && !f.endsWith(".retrain.jsonl"))
     .sort();
   if (!files.length) {
     console.error(`No trace files in ${DIR}/. Run the loop first.`);
@@ -45,9 +51,17 @@ const FILE = process.argv[2] || newestTrace();
 const rows = fs.readFileSync(FILE, "utf8")
   .split("\n").filter(Boolean)
   .map(l => { try { return JSON.parse(l); } catch { return null; } })
-  .filter(Boolean);
+  // A run killed with Ctrl+C can leave a half-written final line, and a file from
+  // an older schema will not have these keys. Drop anything that is not a trace
+  // record rather than throwing on it.
+  .filter(r => r && r.model && r.reference && r.delta);
 
-if (!rows.length) { console.error(`${FILE} has no readable lines.`); process.exit(2); }
+if (!rows.length) {
+  console.error(`${FILE} has no readable trace records.`);
+  console.error(`Expected lines with model / reference / delta. If this is a`);
+  console.error(`.retrain.jsonl it is the OUTPUT of this script, not a trace.`);
+  process.exit(2);
+}
 
 // ---------------------------------------------------------------------------
 const stats = (a) => {

@@ -69,7 +69,8 @@ function screenToPolar(px, py) {
   const x = px / PPM + WX0, y = (H - py) / PPM + WY0;
   const range = Math.hypot(x, y);
   const az = Math.atan2(x, y) * 180 / Math.PI;
-  return { az: Math.max(-54, Math.min(54, az)),
+  // matches crowd.js AZ_LIMIT_DEG and gen_v9.py CROWD_LIMIT
+  return { az: Math.max(-40, Math.min(40, az)),
            range: Math.max(12, Math.min(RANGE_MAX, range)) };
 }
 

@@ -33,6 +33,21 @@ const N_UES = 60;
 // Matches gen_v9.py crowd_r = rng.uniform(30.0, 200.0).
 const RANGE_MIN_M = 12;
 const RANGE_MAX_M = 200;
+
+// AZIMUTH MUST MATCH gen_v9.py CROWD_LIMIT.
+//
+// This used to clamp at +/-54 while the generator drew crowd_az from
+// uniform(-40, 40). The model had therefore never seen a crowd in the outer 14
+// degrees of the sector, and when one turned up it extrapolated: measured live,
+// crowd at 53 degrees, the arithmetic reference said 53.5 and the model said
+// 35.4 — an 18 degree error, pulling back toward the range it knew.
+//
+// 40 degrees also keeps the crowd inside the fan. With fan_center bounded at 30
+// (formatter.js) the beams sit at 0/15/30/45/60, so a UE at 40 is 5 degrees off
+// the nearest beam. Well covered.
+//
+// Change this and gen_v9.py CROWD_LIMIT together, or the mismatch comes back.
+const AZ_LIMIT_DEG = 40;
 // Auto Drift steers the crowd back inside this band, so it wanders without
 // pinning itself to the sector edge. Widened from 42-110 so the drift actually
 // visits the far half of the trained range instead of only the middle.
@@ -125,7 +140,7 @@ export class Crowd {
       // if we hit a sector boundary, steer the heading back toward the sector center
       // (mid-range, boresight) and commit to a fresh hold, so it doesn't stutter at the edge
       const tp = toPolar(this.target.x, this.target.y);
-      if (tp.az < -42 || tp.az > 42 || tp.range < DRIFT_MIN_M || tp.range > DRIFT_MAX_M) {
+      if (Math.abs(tp.az) > AZ_LIMIT_DEG - 4 || tp.range < DRIFT_MIN_M || tp.range > DRIFT_MAX_M) {
         const center = fromPolar(0, 100);              // sector middle of the wider band
         this.driftHeading = Math.atan2(center.x - this.target.x, center.y - this.target.y)
                             + gaussian(0, 0.4);         // head back to center, slight randomness
@@ -155,7 +170,7 @@ export class Crowd {
   _clampSector(pt) {
     const clampOne = (o) => {
       let { az, range } = toPolar(o.x, o.y);
-      az = Math.max(-54, Math.min(54, az));
+      az = Math.max(-AZ_LIMIT_DEG, Math.min(AZ_LIMIT_DEG, az));
       range = Math.max(RANGE_MIN_M, Math.min(RANGE_MAX_M, range));
       const p = fromPolar(az, range); o.x = p.x; o.y = p.y;
     };
