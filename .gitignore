@@ -34,3 +34,5 @@ adapter/
 ~$*
 *_3.pptx
 *.bak
+traces/
+src/*.pre-mcp
