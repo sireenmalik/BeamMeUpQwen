@@ -42,6 +42,11 @@ Method:
   3. Apply the smallest set of policy changes that satisfies the intent.
   4. When done, reply in one or two plain sentences saying what you changed and why.
 
+Stopping the loop is almost never right. "Do not chase them" means tighten the
+ceiling so the beam stops reaching outward, not freeze the beam. A frozen beam
+abandons the users still in the cell. Only call run_loop(false) if the intent
+explicitly says to stop, halt, or pause.
+
 Useful context: the ceiling is measured as mean noise rise across the users of a neighbour
 sector, tested against the worst of that site's three sectors. Useful range is 2 to 5 dB;
 above roughly 5 the beam physically cannot reach the ceiling. Lower ceiling means the beam
