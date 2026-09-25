@@ -6,6 +6,8 @@ import dotenv from "dotenv";
 import path from "path";
 import { fileURLToPath } from "url";
 import { ControlLoop } from "./loop.js";
+import { createMcpRouter } from "./mcp-server.js";
+import { createIntentRouter } from "./intent-api.js";
 import { fromPolar } from "./geometry.js";
 
 dotenv.config();
@@ -76,6 +78,9 @@ app.post("/api/stop", (_req, res) => { running = false; res.json({ running }); }
 
 // --- static frontend (built by vite into frontend/dist) ---
 const dist = path.join(__dirname, "..", "frontend", "dist");
+app.use("/mcp", createMcpRouter({ loop, getRunning: () => running, setRunning: (v) => { running = !!v; } }));
+app.use("/api/intent", createIntentRouter());
+
 app.use(express.static(dist));
 app.get("*", (_req, res) => res.sendFile(path.join(dist, "index.html")));
 
