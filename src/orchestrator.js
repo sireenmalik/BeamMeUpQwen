@@ -73,7 +73,7 @@ function textOf(mcpResult) {
 }
 
 async function callNim(messages, tools, attempt = 0) {
-  const MAX_RETRIES = 4;
+  const MAX_RETRIES = 6;
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), NIM_TIMEOUT_MS);
   try {

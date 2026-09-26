@@ -274,7 +274,9 @@ export class ControlLoop {
       spreadRising, splitDetected,
       load
     };
+    const _t0 = Date.now();
     const params = await decide(obs);
+    const _tModel = Date.now() - _t0;
 
     // ------------------------------------------------------------------
     // THE MODEL PROPOSES. IF IT CANNOT, THE BEAM HOLDS.
@@ -561,6 +563,9 @@ export class ControlLoop {
       } : null,
       escalation: this.escalation
     };
+    if (process.env.TIMING === "1") {
+      console.log(`tick ${this.tick}  model ${_tModel}ms  total ${Date.now() - _t0}ms`);
+    }
     this.lastLog = log;
     this.lastProposal = params;
 
