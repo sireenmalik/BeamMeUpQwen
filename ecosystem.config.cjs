@@ -6,7 +6,7 @@ module.exports = {
     env: {
       NODE_ENV: "production",
       PORT: 3000,
-      TICK_MS: 3000,
+      TICK_MS: 400,
       MODEL_PROVIDER: "openai",
       MODEL_ENDPOINT: "http://127.0.0.1:11434/v1",
       MODEL_NAME: "beam-v9",

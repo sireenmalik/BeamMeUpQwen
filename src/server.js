@@ -21,8 +21,21 @@ const loop = new ControlLoop();
 // tick cadence: 1–5 s band. Default 2s (matched to pedestrian pace).
 const TICK_MS = Number(process.env.TICK_MS || 2000);
 let running = false;   // start PAUSED — no mode selected yet, nothing tracking
-async function tickOnce() { if (running) { try { await loop.stepAsync(); } catch (e) { console.error(e); } } }
-setInterval(tickOnce, TICK_MS);
+// SELF-SCHEDULING, NOT setInterval.
+//
+// setInterval fires on a fixed clock regardless of whether the previous tick has
+// finished. Inference runs 2.3-2.6s and Ollama serializes (OLLAMA_NUM_PARALLEL=1),
+// so any tick shorter than the slowest call stacked requests that never drained:
+// llama-server pinned at 200% CPU and a manual query queued behind 20+ seconds of
+// backlog. Scheduling the NEXT tick only after the current one completes makes
+// overlap impossible, so TICK_MS becomes a minimum gap rather than a hard clock.
+async function tickOnce() {
+  if (running) {
+    try { await loop.stepAsync(); } catch (e) { console.error(e); }
+  }
+  setTimeout(tickOnce, TICK_MS);
+}
+setTimeout(tickOnce, TICK_MS);
 
 // --- API ---
 app.get("/api/state", (_req, res) => res.json({ ...loop.state(), running }));
