@@ -238,7 +238,16 @@ export class ControlLoop {
     // ------------------------------------------------------------------
     const servingLin = rsrp.reduce((a, v) => a + Math.pow(10, v / 10), 0);
     const servingDbm = 10 * Math.log10(servingLin / rsrp.length);
-    this.handover = this.neighbours.evaluateHandover(ues, servingDbm, this.fanCenter, this.tilt);
+    // WHILE HANDED OVER, MEASURE AGAINST THE PLANNED SECTOR, NOT THE CURRENT BEAM.
+    //
+    // A UE's mobility measurement comes from the always-on SSB grid covering the
+    // sector, not from a steered tracking beam. Without this the A3 flag could
+    // latch: once fired it never cleared, so the meter stayed full and the banner
+    // never fired again in the same session.
+    const wasHandedOver = !!this.handover?.active;
+    const hoFan  = wasHandedOver ? START_FAN_CENTER : this.fanCenter;
+    const hoTilt = wasHandedOver ? START_TILT       : this.tilt;
+    this.handover = this.neighbours.evaluateHandover(ues, servingDbm, hoFan, hoTilt);
 
     // capture the beam position BEFORE this tick's update, so the reason text can
     // describe the actual direction of movement
