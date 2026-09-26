@@ -347,7 +347,13 @@ export class ControlLoop {
     // There is NO release logic. When the crowd walks back inside, our RSRP rises,
     // A3 stops being satisfied, and the model is steering again on its own.
     // ------------------------------------------------------------------
-    if (this.handover?.active) {
+    // A3 IS REPORTED, NOT ACTED ON.
+    //
+    // Parking the beam on handover froze the demo: the parked beam kept serving
+    // low, which kept A3 satisfied, which kept it parked. This build showcases
+    // tracking, so handover stays a displayed signal and the beam keeps following.
+    // Set HANDOVER_PARKS=1 to restore the parking behaviour.
+    if (this.handover?.active && process.env.HANDOVER_PARKS === "1") {
       dec.proposedWhileHandedOver = { fan_center: modelFan, tilt: modelTilt };
       chosenFan  = this.fanCenter;      // park
       chosenTilt = this.tilt;
